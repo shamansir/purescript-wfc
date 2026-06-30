@@ -4,7 +4,7 @@ import Prelude
 
 import Data.Array as Array
 import Data.Foldable (class Foldable, foldl, foldr, foldMap, all)
-import Data.Maybe (Maybe(..), fromJust)
+import Data.Maybe (Maybe, fromJust)
 import Data.Traversable (class Traversable, traverse, sequence)
 import Partial.Unsafe (unsafePartial)
 import WFC.Direction (Direction, dirOffset)
@@ -22,6 +22,9 @@ newtype Pattern a = Pattern (Array a)
 
 derive instance eqPattern  :: Eq a => Eq (Pattern a)
 derive instance ordPattern :: Ord a => Ord (Pattern a)
+
+instance showPattern :: Show a => Show (Pattern a) where
+  show (Pattern px) = "Pattern " <> show px
 
 instance functorPattern :: Functor Pattern where
   map f (Pattern px) = Pattern (map f px)

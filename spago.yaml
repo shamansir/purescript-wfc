@@ -23,6 +23,9 @@ package:
     dependencies:
       - arrays
       - ordered-collections
+      - numbers
+      - spec
+      - spec-node
 workspace:
   packageSet:
     registry: 77.10.0
