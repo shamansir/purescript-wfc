@@ -1,0 +1,29 @@
+package:
+  name: wfc
+  dependencies:
+    - console
+    - effect
+    - prelude
+    - arrays
+    - ordered-collections
+    - transformers
+    - control
+    - integers
+    - numbers
+    - lists
+    - tuples
+    - foldable-traversable
+    - random
+    - partial
+    - maybe
+    - either
+    - newtype
+  test:
+    main: Test.Main
+    dependencies:
+      - arrays
+      - ordered-collections
+workspace:
+  packageSet:
+    registry: 77.10.0
+  extraPackages: {}
