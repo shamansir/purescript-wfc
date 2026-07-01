@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<!-- Build: spago bundle --package demo --module Demo.Main --outfile index.js --platform browser -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WFC Demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: ui-monospace, 'Cascadia Code', 'Fira Mono', monospace;
+      font-size: 13px;
+      display: flex;
+      align-items: stretch;
+      min-height: 100vh;
+    }
+
+    .demo {
+      display: flex;
+      flex-direction: row;
+      width: 100%;
+      gap: 16px;
+      padding: 16px;
+    }
+
+    /* ---- Sidebar ---- */
+    .sidebar {
+      width: 280px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .sidebar select {
+      width: 100%;
+      background: #161b22;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-family: inherit;
+      font-size: 13px;
+    }
+
+    /* ---- Controls ---- */
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .controls button {
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .controls button:hover:not(:disabled) { background: #30363d; }
+    .controls button:disabled { opacity: 0.4; cursor: default; }
+
+    /* ---- Stats ---- */
+    .stats {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 8px 10px;
+      line-height: 1.6;
+      font-size: 11px;
+      color: #8b949e;
+    }
+
+    /* ---- Pattern section ---- */
+    .pattern-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .toggle-btn {
+      background: #161b22;
+      color: #8b949e;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .toggle-btn:hover { background: #21262d; }
+
+    .pattern-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+
+    .pattern-thumb {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+    }
+
+    .pattern-grid {
+      display: grid;
+      width: 40px;
+      height: 40px;
+    }
+
+    .mini-cell {
+      width: 100%;
+      height: 100%;
+    }
+
+    .pat-label {
+      font-size: 9px;
+      color: #8b949e;
+    }
+
+    /* ---- Main view ---- */
+    .main-view {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      align-items: flex-start;
+    }
+
+    canvas {
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      display: block;
+      image-rendering: pixelated;
+    }
+
+    /* ---- Matrix ---- */
+    .matrix {
+      border-collapse: collapse;
+      font-size: 8px;
+    }
+
+    .matrix td {
+      width: 14px;
+      height: 14px;
+      border: 1px solid rgba(255,255,255,0.05);
+      vertical-align: middle;
+      overflow: hidden;
+      padding: 0;
+    }
+
+    .uncollapsed {
+      background: #1e2530;
+    }
+
+    .sudoku {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      width: 100%;
+      height: 100%;
+    }
+
+    .sudoku span {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script src="index.js" type="module"></script>
+</body>
+</html>

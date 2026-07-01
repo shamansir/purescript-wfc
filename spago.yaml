@@ -26,6 +26,12 @@ package:
       - numbers
       - spec
       - spec-node
+      - halogen
+      - canvas
+      - now
+      - web-html
+      - aff
+      - datetime
 workspace:
   packageSet:
     registry: 77.10.0

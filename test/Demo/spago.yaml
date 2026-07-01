@@ -1,0 +1,20 @@
+package:
+  name: demo
+  dependencies:
+    - wfc
+    - prelude
+    - effect
+    - aff
+    - halogen
+    - canvas
+    - now
+    - web-html
+    - datetime
+    - arrays
+    - ordered-collections
+    - integers
+    - tuples
+    - foldable-traversable
+    - maybe
+    - either
+    - numbers
