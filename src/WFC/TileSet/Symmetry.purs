@@ -5,6 +5,7 @@ module WFC.TileSet.Symmetry
   , distinctOrientations
   , rotateIndex
   , rotateIndexBy
+  , reflectIndex
   ) where
 
 import Prelude
@@ -73,16 +74,42 @@ distinctOrientations sym = Array.range 0 (cardinality sym - 1)
 -- These are the original algorithm's per-class rotation permutations,
 -- reproduced directly rather than re-derived: `SymI`/`SymDiag` are
 -- order-2 (180° rotation is a no-op), `SymL`/`SymT` are a plain 4-cycle,
--- `SymF` cycles its unmirrored (0-3) and mirrored (4-7) halves separately.
+-- `SymF` cycles its unmirrored (0-3) and mirrored (4-7) halves separately —
+-- and in *opposite* directions from each other (4→7→6→5→4, not
+-- 4→5→6→7→4): a rotation can never cross the mirror boundary, but within
+-- the mirrored half it still has to compose correctly with `reflectIndex`
+-- below (`rotate >>> reflect == reflect >>> rotate⁻¹`, the standard
+-- dihedral-group relation) — reproduced from `SimpleTiledModel.cs`'s own
+-- `a = i => i < 4 ? (i + 1) % 4 : 4 + (i - 1) % 4`.
 rotateIndex :: Symmetry -> Int -> Int
 rotateIndex SymX _ = 0
 rotateIndex SymI i = 1 - i
 rotateIndex SymDiag i = 1 - i
 rotateIndex SymL i = (i + 1) `mod` 4
 rotateIndex SymT i = (i + 1) `mod` 4
-rotateIndex SymF i = if i < 4 then (i + 1) `mod` 4 else 4 + ((i + 1) `mod` 4)
+rotateIndex SymF i = if i < 4 then (i + 1) `mod` 4 else 4 + ((i - 1) `mod` 4)
 
 -- Rotate by N 90° steps (N taken mod 4, since a full grid rotation cycle
 -- is always 4 steps regardless of a tile's own cardinality).
 rotateIndexBy :: Symmetry -> Int -> Int -> Int
 rotateIndexBy sym n i0 = Array.foldl (\i _ -> rotateIndex sym i) i0 (Array.replicate (n `mod` 4) unit)
+
+-- Reflect one of a tile's own distinct-orientation indices across a
+-- vertical axis (a horizontal flip), landing on another (or the same)
+-- index within `0 .. cardinality - 1` — the original algorithm's `b`
+-- (reflection) permutation per class, reproduced directly alongside `a`
+-- (`rotateIndex`) above. A no-op for `X`/`I` (those classes' own picture is
+-- already mirror-symmetric — flipping it lands back on the same index),
+-- but a *real* permutation for `L`/`T`/`\`/`F`, e.g. `L`'s mirror image is
+-- one of its own other rotations (`i even -> i+1, i odd -> i-1`), not
+-- itself — this is what `WFC.TileSet.expandRule` uses to expand a declared
+-- `<neighbor>` rule across reflection as well as rotation, matching
+-- `SimpleTiledModel.cs`'s `densePropagator` construction (which uses this
+-- same `b` table via `action[t][4..7]`).
+reflectIndex :: Symmetry -> Int -> Int
+reflectIndex SymX _ = 0
+reflectIndex SymI i = i
+reflectIndex SymDiag i = 1 - i
+reflectIndex SymL i = if i `mod` 2 == 0 then i + 1 else i - 1
+reflectIndex SymT i = if i `mod` 2 == 0 then i else 4 - i
+reflectIndex SymF i = if i < 4 then i + 4 else i - 4

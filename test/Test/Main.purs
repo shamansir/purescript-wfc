@@ -804,14 +804,47 @@ main = runSpecAndExitProcess [consoleReporter] do
         parseSymmetry "F" `shouldEqual` Right SymF
         parseSymmetry "?" `shouldSatisfy` isLeft
 
-    describe "expandRule — one declared rule expanded across all 4 grid rotations" do
+    describe "expandRule — one declared rule expanded across rotation AND reflection" do
 
-      it "always produces exactly 4 facts, one per cardinal direction" do
+      it "a fully asymmetric (SymF) pair produces 8 facts, 2 per cardinal direction" do
         let symOf _ = SymF
             rule = { leftName: "a", leftRot: 0, rightName: "b", rightRot: 0 }
             facts = TS.expandRule symOf rule
-        Array.length facts `shouldEqual` 4
-        Array.sort (map _.dir facts) `shouldEqual` Array.sort allDirections
+        Array.length facts `shouldEqual` 8
+        Array.sort (map _.dir facts) `shouldEqual` Array.sort (allDirections <> allDirections)
+
+      it "the mirrored half swaps left/right and reflects each side's orientation" do
+        -- SymF's `reflectIndex` is `i < 4 ? i + 4 : i - 4` — a real, non-identity
+        -- permutation — so the reflected base fact really is a different pair
+        -- (right-then-left, both sides bumped into the mirrored half 4..7),
+        -- not a duplicate of the plain-rotation facts.
+        let symOf _ = SymF
+            rule = { leftName: "a", leftRot: 0, rightName: "b", rightRot: 0 }
+            facts = TS.expandRule symOf rule
+            atDirR = Array.filter (\f -> f.dir == DirR) facts
+        atDirR `shouldEqual`
+          [ { dir: DirR, left: TS.TileInstance { name: "a", orientation: 0 }, right: TS.TileInstance { name: "b", orientation: 0 } }
+          , { dir: DirR, left: TS.TileInstance { name: "b", orientation: 4 }, right: TS.TileInstance { name: "a", orientation: 4 } }
+          ]
+
+      it "SymL's mirror image is a different rotation of itself, not a no-op" do
+        -- A straight ("I") track next to a corner ("L") turn — same shape
+        -- as Circuit.xml's actual `<neighbor left="track" right="turn"/>`.
+        -- The corner's reflection lands on one of its own *other* rotations
+        -- (`reflectIndex SymL 0 == 1`), so the mirrored half is genuinely
+        -- new information the solver needs — this is the exact gap that
+        -- caused Circuit's roads to break: losing it meant losing real,
+        -- valid corner/junction adjacencies (track's own reflection is a
+        -- no-op, `reflectIndex SymI 0 == 0`, so only `turn`'s side changes).
+        let symOf "track" = SymI
+            symOf _         = SymL
+            rule = { leftName: "track", leftRot: 0, rightName: "turn", rightRot: 0 }
+            facts = TS.expandRule symOf rule
+            atDirR = Array.filter (\f -> f.dir == DirR) facts
+        atDirR `shouldEqual`
+          [ { dir: DirR, left: TS.TileInstance { name: "track", orientation: 0 }, right: TS.TileInstance { name: "turn", orientation: 0 } }
+          , { dir: DirR, left: TS.TileInstance { name: "turn", orientation: 1 }, right: TS.TileInstance { name: "track", orientation: 0 } }
+          ]
 
       it "SymX never changes orientation, in any of the 4 rotations" do
         let symOf _ = SymX
