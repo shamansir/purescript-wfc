@@ -57,9 +57,9 @@ customSampleDef ci =
 
 -- main -> worker
 type Command =
-  { kind            :: String -- "run" | "stop"
-  , sampleIdx       :: Int     -- ignored for "stop"; -1 means "use `custom` below"
-  , mode            :: String -- "once" | "untilSolved"
+  { kind            :: String -- "run" | "step" | "stop" | "resetSession"
+  , sampleIdx       :: Int     -- ignored for "stop"/"resetSession"; -1 means "use `custom` below"
+  , mode            :: String -- "once" | "untilSolved" for "run"; ignored (ever ""/single-shot) for "step"
   , custom          :: CustomImage -- ignored unless sampleIdx == -1 and not tiledMode
   , useBacktracking :: Boolean -- undo just the last guess instead of a full restart
   , tiledMode       :: Boolean -- hand-authored tiles (WFC.Tiles) instead of the overlapping model
@@ -73,6 +73,10 @@ type Command =
 -- worker -> main
 type Progress =
   { kind           :: String -- "progress" | "done" | "contradiction" | "stopped"
+  , token          :: Int    -- the worker's internal request counter at the time of this message;
+                              -- mirrored by the main thread's own send-count so a message can be
+                              -- recognized as stale (from a run/step superseded by a later one,
+                              -- including a Stop) and ignored, without a separate stop/pause flag
   , step           :: Int
   , solvedDelta    :: Int
   , solvedTotal    :: Int
@@ -81,6 +85,8 @@ type Progress =
   , restarted      :: Boolean -- full restart from scratch: a new history row starting at column 0
   , rowBreak       :: Boolean -- this step starts a new history row (restart, or a backtracking pop)
   , rowStartColumn :: Int     -- column that new row starts at when rowBreak; meaningless otherwise
+  , backedOut      :: Boolean -- this single step performed a backtrack pop (WFC.Backtrack.BackedOut)
+  , continuous     :: Boolean -- true for a Run-driven message (loop keeps animating); false for a single "step" reply
   , contraX        :: Int -- -1 if none
   , contraY        :: Int -- -1 if none
   , grid           :: Grid
@@ -89,6 +95,7 @@ type Progress =
 emptyProgress :: Progress
 emptyProgress =
   { kind: "progress"
+  , token: 0
   , step: 0
   , solvedDelta: 0
   , solvedTotal: 0
@@ -97,6 +104,8 @@ emptyProgress =
   , restarted: false
   , rowBreak: false
   , rowStartColumn: 0
+  , backedOut: false
+  , continuous: false
   , contraX: -1
   , contraY: -1
   , grid: []

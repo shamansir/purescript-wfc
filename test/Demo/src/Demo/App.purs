@@ -3,17 +3,14 @@ module Demo.App where
 import Prelude
 
 import Data.Array as Array
-import Data.DateTime.Instant (Instant, unInstant)
 import Data.Either (Either(..))
 import Data.Foldable (for_)
 import Data.Int as Int
 import Data.Map as Map
-import Data.Maybe (Maybe(..), fromMaybe, isJust)
-import Data.Time.Duration (Milliseconds(..))
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Aff (Aff)
-import Effect.Now (now)
 import Graphics.Canvas as Canvas
 import Halogen as H
 import Halogen.HTML as HH
@@ -29,12 +26,9 @@ import Demo.TileSamples (TileSampleDef)
 import Demo.TileSamples as TileSamples
 import Demo.WorkerProtocol (Grid, CellSnapshot)
 import Demo.WorkerProtocol as WP
-import WFC.Algorithm (step)
 import WFC.Catalog (PatternCatalog, extractPatterns)
-import WFC.Grid (Pos(..))
 import WFC.Pattern (Pattern(..), PatternId)
-import WFC.Propagate (Contradiction(..)) as Propagate
-import WFC.Rules (AdjacencyRules, buildRules)
+import WFC.Rules (buildRules)
 import WFC.Tiles (buildTiledCatalog, buildTiledRules)
 import WFC.Wave (Wave, initWave)
 import Web.Event.Event as Event
@@ -57,8 +51,6 @@ type State =
   { sampleIdx   :: Int
   , status      :: WFCStatus
   , catalog     :: Maybe (PatternCatalog Int)
-  , rules       :: Maybe AdjacencyRules
-  , wave        :: Maybe (Wave Int)
   , initWave_   :: Maybe (Wave Int)
   , stepCount   :: Int
   , stepTimes   :: Array Number
@@ -66,7 +58,7 @@ type State =
   , showPats    :: Boolean
   , worker        :: Maybe Worker
   , running       :: Boolean
-  , stopRequested :: Boolean
+  , cmdSeq        :: Int -- mirrors the worker's internal request counter; see `sendToWorker`
   , displayGrid   :: Maybe Grid
   , progressLog   :: Array WP.Progress
   , customImage   :: Maybe WP.CustomImage
@@ -79,7 +71,16 @@ type State =
   , outH            :: Int -- result grid height; defaults to the active sample's own outH
   , useRotations    :: Boolean -- overlapping model only; also extract 90/180/270 rotations
   , useMirror       :: Boolean -- overlapping model only; also extract the horizontal reflection
+  , extractedWith   :: Maybe ExtractSettings -- settings `catalog` was actually extracted with
+  , stepBackedOut   :: Boolean -- the last manual Step performed a backtrack pop (WFC.Backtrack.BackedOut)
   }
+
+-- Just the settings that affect what `ExtractPatterns` produces — captured
+-- at extraction time so a later change to any of them (before the next
+-- Extract) can be detected and flagged as stale, without re-deriving it
+-- from unrelated state (result size doesn't affect pattern extraction, so
+-- it's deliberately not tracked here).
+type ExtractSettings = { patternSize :: Int, useRotations :: Boolean, useMirror :: Boolean }
 
 data Action
   = Init
@@ -115,8 +116,6 @@ initialState =
   { sampleIdx:   0
   , status:      Idle
   , catalog:     Nothing
-  , rules:       Nothing
-  , wave:        Nothing
   , initWave_:   Nothing
   , stepCount:   0
   , stepTimes:   []
@@ -124,7 +123,7 @@ initialState =
   , showPats:    false
   , worker:        Nothing
   , running:       false
-  , stopRequested: false
+  , cmdSeq:        0
   , displayGrid:   Nothing
   , progressLog:   []
   , customImage:   Nothing
@@ -137,17 +136,13 @@ initialState =
   , outH:            checkerboard.outH
   , useRotations:    false
   , useMirror:       false
+  , extractedWith:   Nothing
+  , stepBackedOut:   false
   }
 
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
-
-timeDiff :: Instant -> Instant -> Number
-timeDiff t0 t1 =
-  let Milliseconds ms0 = unInstant t0
-      Milliseconds ms1 = unInstant t1
-  in ms1 - ms0
 
 fmtMs :: Number -> String
 fmtMs ms =
@@ -210,6 +205,16 @@ activeGrid st = case st.viewedStep >>= Array.index st.progressLog of
   Just p  -> Just p.grid
   Nothing -> st.displayGrid
 
+-- True when there's no catalog yet, or the pattern-size/rotate/mirror
+-- settings have changed since the catalog currently shown was extracted
+-- (`st.extractedWith` is only set by `ExtractPatterns`, and cleared
+-- whenever `resetRunState` runs) — drives both the Extract button's
+-- highlight and the "~" staleness marker on the Patterns panel title.
+patternsStale :: State -> Boolean
+patternsStale st = case st.extractedWith of
+  Nothing -> true
+  Just e  -> e.patternSize /= st.patternSize || e.useRotations /= st.useRotations || e.useMirror /= st.useMirror
+
 stopCommand :: WP.Command
 stopCommand =
   { kind: "stop", sampleIdx: 0, mode: "", custom: WP.emptyCustomImage
@@ -218,20 +223,38 @@ stopCommand =
   , useRotations: false, useMirror: false
   }
 
-runCommand :: State -> String -> WP.Command
-runCommand st mode = case st.customImage of
+-- Cancels any in-flight run *and* discards the worker's persistent solving
+-- session — unlike `stopCommand`, which only cancels (Stop deliberately
+-- keeps the session alive so Step/Run can resume from it). Sent whenever
+-- the sample/settings actually change underneath it: Extract, Reset,
+-- switching samples, toggling tiled mode.
+resetSessionCommand :: WP.Command
+resetSessionCommand = stopCommand { kind = "resetSession" }
+
+-- Shared by "run" (Run once/Run until solved) and "step" (Step) — both
+-- just tell the worker what sample/settings to (lazily) build a fresh
+-- session from if it doesn't have a live one already; `mode` only matters
+-- to "run" ("once"/"untilSolved" — "step" ignores it, always single-shot).
+buildCommand :: State -> String -> String -> WP.Command
+buildCommand st kind mode = case st.customImage of
   Just ci | not st.tiledMode ->
-    { kind: "run", sampleIdx: -1, mode, custom: ci
+    { kind, sampleIdx: -1, mode, custom: ci
     , useBacktracking: st.useBacktracking, tiledMode: false
     , patternSize: st.patternSize, outW: st.outW, outH: st.outH
     , useRotations: st.useRotations, useMirror: st.useMirror
     }
   _ ->
-    { kind: "run", sampleIdx: st.sampleIdx, mode, custom: WP.emptyCustomImage
+    { kind, sampleIdx: st.sampleIdx, mode, custom: WP.emptyCustomImage
     , useBacktracking: st.useBacktracking, tiledMode: st.tiledMode
     , patternSize: st.patternSize, outW: st.outW, outH: st.outH
     , useRotations: st.useRotations, useMirror: st.useMirror
     }
+
+runCommand :: State -> String -> WP.Command
+runCommand st mode = buildCommand st "run" mode
+
+stepCommand :: State -> WP.Command
+stepCommand st = buildCommand st "step" ""
 
 -- Fields shared by "switch to a different sample" (built-in or uploaded):
 -- drop whatever local wave/run/progress state referred to the old sample.
@@ -239,17 +262,16 @@ resetRunState :: State -> State
 resetRunState s = s
   { status        = Idle
   , catalog       = Nothing
-  , rules         = Nothing
-  , wave          = Nothing
   , initWave_     = Nothing
   , stepCount     = 0
   , stepTimes     = []
   , totalTime     = 0.0
   , running       = false
-  , stopRequested = true
   , displayGrid   = Nothing
   , progressLog   = []
   , viewedStep    = Nothing
+  , extractedWith = Nothing
+  , stepBackedOut = false
   }
 
 -- Reasonable defaults for a freshly-decoded upload: N=3 when the image is at
@@ -346,28 +368,45 @@ ensureWorker = do
       H.modify_ _ { worker = Just w }
       pure w
 
+-- Every message sent to the worker bumps its internal request counter by
+-- exactly one (`Demo.Worker.handleMessage`), and the single ordered
+-- postMessage channel guarantees the Nth message sent is the Nth one the
+-- worker processes — so mirroring that count locally in `cmdSeq` lets
+-- `WorkerMsg` recognize a stale reply (from a run/step superseded by a
+-- later one, including a Stop) just by comparing `msg.token`, with no
+-- separate stop/pause flag to keep in sync by hand.
+sendToWorker :: WP.Command -> H.HalogenM State Action Slots Void Aff Unit
+sendToWorker cmd = do
+  st <- H.get
+  for_ st.worker \w -> do
+    H.modify_ _ { cmdSeq = st.cmdSeq + 1 }
+    H.liftEffect (Worker.postMessage cmd w)
+
+-- Same, but spawns the worker first if this is the very first command sent
+-- to it ("run"/"step" need to reach a worker that may not exist yet;
+-- "stop"/"resetSession" are no-ops when there's nothing to stop/reset, so
+-- they use `sendToWorker` instead and skip spawning one just to tell it
+-- nothing).
+sendToWorkerEnsuring :: WP.Command -> H.HalogenM State Action Slots Void Aff Unit
+sendToWorkerEnsuring cmd = do
+  _  <- ensureWorker
+  sendToWorker cmd
+
 applySampleDefaults :: H.HalogenM State Action Slots Void Aff Unit
 applySampleDefaults = do
   st <- H.get
   let d = sampleDefaults st
   H.modify_ _ { patternSize = d.n, outW = d.outW, outH = d.outH }
 
+-- Continues the worker's session if it has one (from earlier Steps, or a
+-- Run that was Stopped) rather than forcing a fresh start — matches Step's
+-- continuation behavior, so switching between the two controls mid-solve
+-- doesn't lose progress either way.
 startRun :: String -> H.HalogenM State Action Slots Void Aff Unit
 startRun mode = do
   st <- H.get
-  w  <- ensureWorker
-  H.modify_ _
-    { running       = true
-    , stopRequested = false
-    , status        = Stepped
-    , progressLog   = []
-    , displayGrid   = Nothing
-    , viewedStep    = Nothing
-    , stepCount     = 0
-    , stepTimes     = ([] :: Array Number)
-    , totalTime     = 0.0
-    }
-  H.liftEffect $ Worker.postMessage (runCommand st mode) w
+  H.modify_ _ { running = true, status = Stepped, viewedStep = Nothing }
+  sendToWorkerEnsuring (runCommand st mode)
 
 -- ---------------------------------------------------------------------------
 -- Component
@@ -597,7 +636,7 @@ renderSourceControls st =
     [ HP.class_ (H.ClassName "controls") ]
     [ HH.button
         [ HE.onClick \_ -> ExtractPatterns
-        , HP.class_ (H.ClassName (if isJust st.catalog then "" else "needs-extract"))
+        , HP.class_ (H.ClassName (if patternsStale st then "needs-extract" else ""))
         ]
         [ HH.text "◫ Extract" ]
     ]
@@ -614,8 +653,9 @@ renderRunControls st =
     [ HH.button
         [ HE.onClick \_ -> StepOnce
         , HP.disabled (notReady || st.running)
+        , HP.title (if st.stepBackedOut then "Last step backtracked to an earlier decision" else "")
         ]
-        [ HH.text "▶ Step" ]
+        [ HH.text (if st.stepBackedOut then "⟲ Step" else "▶ Step") ]
     , HH.button
         [ HE.onClick \_ -> ResetWave
         , HP.disabled (noStepsTaken || st.running)
@@ -779,8 +819,9 @@ renderPatterns st =
             , HP.class_ (H.ClassName "toggle-btn")
             ]
             [ HH.text
-                ( (if st.showPats then "▲ Patterns (" else "▼ Patterns (")
-                  <> show (Map.size cat.patterns) <> ")"
+                ( (if st.showPats then "▲ " else "▼ ")
+                  <> (if patternsStale st then "~" else "")
+                  <> "Patterns (" <> show (Map.size cat.patterns) <> ")"
                 )
             ]
         , if st.showPats
@@ -915,7 +956,7 @@ handleAction = case _ of
 
   SelectSample idx -> do
     st <- H.get
-    for_ st.worker (H.liftEffect <<< Worker.postMessage stopCommand)
+    sendToWorker resetSessionCommand
     H.modify_ \s -> (resetRunState s)
       { sampleIdx   = idx
       , customImage = Nothing
@@ -948,8 +989,7 @@ handleAction = case _ of
         case mFiles >>= FileList.item 0 of
           Nothing -> pure unit
           Just file -> do
-            st <- H.get
-            for_ st.worker (H.liftEffect <<< Worker.postMessage stopCommand)
+            sendToWorker resetSessionCommand
             result <- H.liftAff (ImageUpload.loadImageAsSample 32 file)
             case result of
               Left err ->
@@ -964,6 +1004,7 @@ handleAction = case _ of
 
   ExtractPatterns -> do
     st <- H.get
+    sendToWorker resetSessionCommand
     let Tuple cat rules =
           if st.tiledMode
             then
@@ -979,8 +1020,6 @@ handleAction = case _ of
     H.modify_ \s -> s
       { status      = Ready
       , catalog     = Just cat
-      , rules       = Just rules
-      , wave        = Just wave
       , initWave_   = Just wave
       , stepCount   = 0
       , stepTimes   = ([] :: Array Number)
@@ -988,78 +1027,34 @@ handleAction = case _ of
       , displayGrid = Just (WP.waveToSnapshot cat wave)
       , progressLog = []
       , viewedStep  = Nothing
+      , extractedWith = Just { patternSize: st.patternSize, useRotations: st.useRotations, useMirror: st.useMirror }
+      , stepBackedOut = false
       }
     drawCanvas
 
+  -- Single step, driven through the worker's persistent session (same one
+  -- Run once/Run until solved/Stop share) so it continues from wherever
+  -- that session currently is — whether it got there via earlier Steps, a
+  -- completed Run, or a Run that was Stopped mid-way — instead of
+  -- restarting. The reply lands in `WorkerMsg` like any other worker
+  -- message (`msg.continuous = false` keeps it from flipping `running`).
   StepOnce -> do
     st <- H.get
-    case Tuple st.catalog st.wave of
-      Tuple (Just cat) (Just wave) -> do
-        t0 <- H.liftEffect now
-        result <- H.liftEffect (step wave)
-        t1 <- H.liftEffect now
-        let elapsed   = timeDiff t0 t1
-            prevTotal = fromMaybe 0 (map _.solvedTotal (Array.last st.progressLog))
-            logEntry snap kind contra =
-              WP.emptyProgress
-                { kind        = kind
-                , step        = st.stepCount + 1
-                , solvedDelta = WP.solvedCount snap - prevTotal
-                , solvedTotal = WP.solvedCount snap
-                , totalCells  = WP.totalCellCount snap
-                , elapsedMs   = elapsed
-                , contraX     = fromMaybe (-1) (map _.x contra)
-                , contraY     = fromMaybe (-1) (map _.y contra)
-                , grid        = snap
-                }
-        case result of
-          Left (Propagate.Contradiction (Pos p)) -> do
-            let snap = WP.markContradiction p.x p.y (WP.waveToSnapshot cat wave)
-            H.modify_ \s -> s
-              { status      = Contradiction
-              , stepCount   = s.stepCount + 1
-              , stepTimes   = Array.snoc s.stepTimes elapsed
-              , totalTime   = s.totalTime + elapsed
-              , displayGrid = Just snap
-              , viewedStep  = Nothing
-              , progressLog = Array.snoc s.progressLog (logEntry snap "contradiction" (Just p))
-              }
-          Right Nothing -> do
-            let snap = WP.waveToSnapshot cat wave
-            H.modify_ \s -> s
-              { status      = Done
-              , stepCount   = s.stepCount + 1
-              , stepTimes   = Array.snoc s.stepTimes elapsed
-              , totalTime   = s.totalTime + elapsed
-              , displayGrid = Just snap
-              , viewedStep  = Nothing
-              , progressLog = Array.snoc s.progressLog (logEntry snap "done" Nothing)
-              }
-          Right (Just wave') -> do
-            let snap = WP.waveToSnapshot cat wave'
-            H.modify_ \s -> s
-              { wave        = Just wave'
-              , status      = Stepped
-              , stepCount   = s.stepCount + 1
-              , stepTimes   = Array.snoc s.stepTimes elapsed
-              , totalTime   = s.totalTime + elapsed
-              , displayGrid = Just snap
-              , viewedStep  = Nothing
-              , progressLog = Array.snoc s.progressLog (logEntry snap "progress" Nothing)
-              }
-        drawCanvas
-      _ -> pure unit
+    case st.catalog of
+      Nothing -> pure unit
+      Just _  -> sendToWorkerEnsuring (stepCommand st)
 
   ResetWave -> do
     st <- H.get
+    sendToWorker resetSessionCommand
     H.modify_ \s -> s
-      { wave        = s.initWave_
-      , status      = Ready
+      { status      = Ready
       , stepCount   = 0
       , stepTimes   = ([] :: Array Number)
       , totalTime   = 0.0
       , viewedStep  = Nothing
       , progressLog = []
+      , stepBackedOut = false
       , displayGrid = case Tuple st.catalog st.initWave_ of
           Tuple (Just cat) (Just w) -> Just (WP.waveToSnapshot cat w)
           _                         -> st.displayGrid
@@ -1070,17 +1065,18 @@ handleAction = case _ of
   RunUntilSolved -> startRun "untilSolved"
 
   Stop -> do
-    st <- H.get
-    for_ st.worker (H.liftEffect <<< Worker.postMessage stopCommand)
-    H.modify_ _ { running = false, stopRequested = true, status = Stopped }
+    sendToWorker stopCommand
+    H.modify_ _ { running = false, status = Stopped }
 
   WorkerMsg ev -> do
     st <- H.get
-    -- A step already in flight when Stop was clicked can still land after
-    -- it; once the user has asked to stop, ignore further worker chatter
-    -- for this run instead of letting a straggler flip `running` back on.
-    unless st.stopRequested do
-      let msg = unsafeCoerce (MessageEvent.data_ ev) :: WP.Progress
+    let msg = unsafeCoerce (MessageEvent.data_ ev) :: WP.Progress
+    -- A step already in flight when Stop (or a later Step/Run) superseded
+    -- it can still land after the fact — `msg.token` is the worker's
+    -- request counter at the time it was sent, and `st.cmdSeq` mirrors it
+    -- on this side (`sendToWorker`), so a mismatch means this reply is
+    -- stale and gets dropped instead of clobbering newer state.
+    when (msg.token == st.cmdSeq) do
       -- The worker reports `elapsedMs` as cumulative time since the run
       -- started (it never resets `t0`, even across restarts), so the
       -- per-step duration is the delta from the previous cumulative value,
@@ -1088,14 +1084,20 @@ handleAction = case _ of
       H.modify_ \s -> s
         { progressLog = Array.snoc s.progressLog msg
         , displayGrid = Just msg.grid
-        , running     = msg.kind == "progress"
+        , running     = msg.continuous && msg.kind == "progress"
         , status      = case msg.kind of
             "done"          -> Done
             "contradiction" -> Contradiction
+            "progress"      -> Stepped
             _               -> s.status
         , stepCount   = msg.step
         , stepTimes   = Array.snoc s.stepTimes (msg.elapsedMs - s.totalTime)
         , totalTime   = msg.elapsedMs
+        -- Only a manual Step's own reply (`continuous = false`) drives this
+        -- — an automatic Run's messages leave it alone, so the Step
+        -- button's rewind mark only ever reflects the last time *it* was
+        -- clicked, not incidental backtrack pops during a Run.
+        , stepBackedOut = if msg.continuous then s.stepBackedOut else msg.backedOut
         }
       drawCanvas
 
@@ -1106,8 +1108,7 @@ handleAction = case _ of
     H.modify_ \st -> st { useBacktracking = not st.useBacktracking }
 
   ToggleTiledMode -> do
-    st <- H.get
-    for_ st.worker (H.liftEffect <<< Worker.postMessage stopCommand)
+    sendToWorker resetSessionCommand
     H.modify_ \s -> (resetRunState s)
       { tiledMode   = not s.tiledMode
       , sampleIdx   = 0
