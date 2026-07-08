@@ -65,6 +65,7 @@ type State =
   , stepTimes   :: Array Number
   , totalTime   :: Number
   , showPats    :: Boolean
+  , showRules   :: Boolean
   , worker        :: Maybe Worker
   , running       :: Boolean
   , untilSolvedRunning :: Boolean -- true only while a "Run until solved" is in flight; keeps Reset clickable through it
@@ -126,6 +127,7 @@ data Action
   | Stop
   | WorkerMsg MessageEvent
   | TogglePatterns
+  | ToggleRules
   | ToggleBacktracking
   | ViewStep Int
   | SetPatternSize Int
@@ -154,6 +156,7 @@ initialState =
   , stepTimes:   []
   , totalTime:   0.0
   , showPats:    false
+  , showRules:   false
   , worker:        Nothing
   , running:       false
   , untilSolvedRunning: false
@@ -452,17 +455,27 @@ loadAllTilesetImages dir def = do
 -- `<img>` + CSS `transform` is enough, no need to preload/cache a
 -- `CanvasImageSource` the way the main canvas draw does — the browser
 -- handles fetching/caching `<img src>` itself.
-tileImageFor :: State -> Maybe Int -> Maybe (Tuple String String)
-tileImageFor st mv = do
-  v      <- mv
-  tileOf <- st.tilesetTileOf
-  dir    <- st.xmlTilesetDir
-  def    <- st.customTileSet
-  ref    <- tileOf v
+-- Shared by the Patterns panel (`tileImageFor`, going through a pattern's
+-- catalog `Int` first) and anything that already has a `TileRef` directly
+-- (the Source-tiles preview and the Rules panel, both reading straight off
+-- `st.customTileSet`, before/without any catalog at all) — just needs
+-- `xmlTilesetDir`/`customTileSet` to know where the picture lives and
+-- whether it's a `unique` (per-orientation-file) tileset.
+tileImageForTile :: State -> WP.TileRef -> Maybe (Tuple String String)
+tileImageForTile st ref = do
+  dir <- st.xmlTilesetDir
+  def <- st.customTileSet
   let t         = orientationTransform ref.orientation
       src       = tileImageSrc dir def.unique ref
       transform = "rotate(" <> show t.rotationDeg <> "deg)" <> (if t.mirrored then " scaleX(-1)" else "")
   pure (Tuple src transform)
+
+tileImageFor :: State -> Maybe Int -> Maybe (Tuple String String)
+tileImageFor st mv = do
+  v      <- mv
+  tileOf <- st.tilesetTileOf
+  ref    <- tileOf v
+  tileImageForTile st ref
 
 -- ---------------------------------------------------------------------------
 -- Canvas drawing
@@ -699,6 +712,7 @@ renderSidebar st =
     , renderSourcePreview st
     , renderSourceControls st
     , renderPatterns st
+    , renderRules st
     ]
 
 -- Running/observing an already-extracted wave — Step/Reset/Run/Stop, the
@@ -883,8 +897,11 @@ renderTilePreview ts =
              ) ts.tiles)
     ]
 
--- Minimal preview for now (per-tile-name color swatches, ignoring
--- orientation) — no real tile-image rendering yet, that's a follow-up.
+-- Each tile's own base picture (orientation 0 — the picture as declared,
+-- before any of its symmetry-derived rotations/mirrors) — `xmlTilesetDir`
+-- is set alongside `customTileSet` at selection time (see `SelectSample`),
+-- well before Extract, so this can show real tiles immediately rather than
+-- waiting on a catalog to exist.
 renderXmlTilesetPreview :: State -> H.ComponentHTML Action Slots Aff
 renderXmlTilesetPreview st =
   HH.div
@@ -895,19 +912,39 @@ renderXmlTilesetPreview st =
         Just def ->
           HH.div
             [ HP.class_ (H.ClassName "tile-list") ]
-            (Array.mapWithIndex
-              (\i t ->
-                HH.div
-                  [ HP.class_ (H.ClassName "tile-swatch")
-                  , HP.style ("background:" <> hueColor i <> ";")
-                  , HP.title (t.name <> " (" <> show t.symmetry <> ")")
-                  ]
-                  []
-              )
-              def.tiles)
+            (map (renderSourceTile st) def.tiles)
     ]
-  where
-  hueColor i = "hsl(" <> show ((i * 137) `mod` 360) <> ", 60%, 55%)"
+
+renderSourceTile :: State -> TS.TileDef -> H.ComponentHTML Action Slots Aff
+renderSourceTile st t =
+  renderTileSwatch st { name: t.name, orientation: 0 } (t.name <> " (" <> show t.symmetry <> ")")
+
+-- One small square tile picture, correctly rotated/mirrored per `ref`'s
+-- orientation — shared by the source-tiles list (always orientation 0) and
+-- the Rules panel (whatever orientation the rule declares on each side).
+-- Falls back to a plain swatch if the image isn't resolvable yet (should
+-- only happen in the instant between selecting a tileset and its
+-- `xmlTilesetDir`/`customTileSet` both landing).
+renderTileSwatch :: State -> WP.TileRef -> String -> H.ComponentHTML Action Slots Aff
+renderTileSwatch st ref tip =
+  case tileImageForTile st ref of
+    Just (Tuple src transform) ->
+      HH.div
+        [ HP.class_ (H.ClassName "tile-swatch")
+        , HP.title tip
+        ]
+        [ HH.img
+            [ HP.src src
+            , HP.style ("width:100%;height:100%;image-rendering:pixelated;transform:" <> transform <> ";")
+            ]
+        ]
+    Nothing ->
+      HH.div
+        [ HP.class_ (H.ClassName "tile-swatch")
+        , HP.style "background:#888888;"
+        , HP.title tip
+        ]
+        []
 
 -- Stays in the left sidebar: controls that pick/build the sample source.
 renderSourceControls :: State -> H.ComponentHTML Action Slots Aff
@@ -1157,6 +1194,51 @@ renderPatThumb st cat (Tuple pid (Pattern px)) =
         [ HH.text (show pid) ]
     ]
 
+-- Only meaningful for an XML tileset (`WFC.TileSet.NeighborRule` is that
+-- format's own adjacency declaration — the overlapping model and the
+-- hand-tiled sockets model each derive adjacency their own way, with
+-- nothing analogous to list here); `def.neighbors` is available as soon as
+-- the tileset's XML is fetched, so — like the source-tiles preview — this
+-- doesn't need to wait on Extract either.
+renderRules :: State -> H.ComponentHTML Action Slots Aff
+renderRules st = case Tuple (sourceKindOf st) st.customTileSet of
+  Tuple SrcXmlTileset (Just def) ->
+    HH.div
+      [ HP.class_ (H.ClassName "rules-section") ]
+      [ HH.button
+          [ HE.onClick \_ -> ToggleRules
+          , HP.class_ (H.ClassName "toggle-btn")
+          ]
+          [ HH.text
+              ( (if st.showRules then "▲ " else "▼ ")
+                <> "Rules (" <> show (Array.length def.neighbors) <> ")"
+              )
+          ]
+      , if st.showRules
+          then
+            HH.div
+              [ HP.class_ (H.ClassName "rule-list") ]
+              (map (renderRuleRow st) def.neighbors)
+          else
+            HH.text ""
+      ]
+  _ -> HH.text ""
+
+-- One declared `<neighbor left="A N" right="B M"/>` row, shown as its two
+-- actual tile pictures (each at the orientation *that rule* declares, not
+-- necessarily each tile's own base orientation) either side of an arrow —
+-- this is always a left-of/right-of pair (`WFC.TileSet.expandRule` is what
+-- turns it into all 4 cardinal directions at catalog-build time; the raw
+-- declaration itself is only ever the one `DirR` relation).
+renderRuleRow :: State -> TS.NeighborRule -> H.ComponentHTML Action Slots Aff
+renderRuleRow st rule =
+  HH.div
+    [ HP.class_ (H.ClassName "rule-row") ]
+    [ renderTileSwatch st { name: rule.leftName, orientation: rule.leftRot } (rule.leftName <> " " <> show rule.leftRot)
+    , HH.div [ HP.class_ (H.ClassName "rule-arrow") ] [ HH.text "→" ]
+    , renderTileSwatch st { name: rule.rightName, orientation: rule.rightRot } (rule.rightName <> " " <> show rule.rightRot)
+    ]
+
 -- Top-right badges on a pattern thumbnail — only for patterns that only
 -- exist in the catalog *because* of the rotation/mirror options
 -- (`cat.origins`; see `WFC.Catalog`'s origin tracking). A pattern that also
@@ -1383,6 +1465,14 @@ handleAction = case _ of
     sendToWorker resetSessionCommand
     H.modify_ \s -> s
       { status      = Ready
+      -- Reset always wins over an in-flight run: `resetSessionCommand`
+      -- (above) discards the worker's session and cancels whatever it was
+      -- doing, so the local "still running" flags need to be cleared right
+      -- along with it — otherwise Pause/Reset/Step/Run's `disabled`
+      -- conditions (all driven by `running`/`untilSolvedRunning`) keep
+      -- reflecting a run that no longer exists.
+      , running     = false
+      , untilSolvedRunning = false
       , stepCount   = 0
       , stepTimes   = ([] :: Array Number)
       , totalTime   = 0.0
@@ -1444,6 +1534,9 @@ handleAction = case _ of
 
   TogglePatterns ->
     H.modify_ \st -> st { showPats = not st.showPats }
+
+  ToggleRules ->
+    H.modify_ \st -> st { showRules = not st.showRules }
 
   ToggleBacktracking ->
     H.modify_ \st -> st { useBacktracking = not st.useBacktracking }

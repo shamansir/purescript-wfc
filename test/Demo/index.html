@@ -372,10 +372,38 @@
     }
 
     .tile-swatch {
-      width: 20px;
-      height: 20px;
+      width: 32px;
+      height: 32px;
       border-radius: 2px;
       border: 1px solid #30363d;
+      overflow: hidden;
+    }
+
+    /* ---- Rules panel: one row per declared <neighbor> rule, shown as its
+       two actual tiles either side of an arrow ---- */
+    .rules-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .rule-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+
+    .rule-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .rule-arrow {
+      color: #8b949e;
+      font-size: 12px;
     }
 
     .sudoku {
