@@ -71,6 +71,8 @@ type State =
   , outH            :: Int -- result grid height; defaults to the active sample's own outH
   , useRotations    :: Boolean -- overlapping model only; also extract 90/180/270 rotations
   , useMirror       :: Boolean -- overlapping model only; also extract the horizontal reflection
+  , inputPeriodic   :: Boolean -- overlapping model only; wrap the source grid when extracting N×N windows
+  , outputPeriodic  :: Boolean -- wrap the output wave's own edges during solving (both models)
   , extractedWith   :: Maybe ExtractSettings -- settings `catalog` was actually extracted with
   , stepBackedOut   :: Boolean -- the last manual Step performed a backtrack pop (WFC.Backtrack.BackedOut)
   }
@@ -78,9 +80,14 @@ type State =
 -- Just the settings that affect what `ExtractPatterns` produces — captured
 -- at extraction time so a later change to any of them (before the next
 -- Extract) can be detected and flagged as stale, without re-deriving it
--- from unrelated state (result size doesn't affect pattern extraction, so
--- it's deliberately not tracked here).
-type ExtractSettings = { patternSize :: Int, useRotations :: Boolean, useMirror :: Boolean }
+-- from unrelated state (result size/output-periodicity don't affect pattern
+-- extraction, so they're deliberately not tracked here).
+type ExtractSettings =
+  { patternSize   :: Int
+  , useRotations  :: Boolean
+  , useMirror     :: Boolean
+  , inputPeriodic :: Boolean
+  }
 
 data Action
   = Init
@@ -103,6 +110,8 @@ data Action
   | SetOutH Int
   | ToggleRotations
   | ToggleMirror
+  | ToggleInputPeriodic
+  | ToggleOutputPeriodic
 
 type Slots :: forall k. Row k
 type Slots = ()
@@ -136,6 +145,8 @@ initialState =
   , outH:            checkerboard.outH
   , useRotations:    false
   , useMirror:       false
+  , inputPeriodic:   checkerboard.periodic
+  , outputPeriodic:  checkerboard.periodic
   , extractedWith:   Nothing
   , stepBackedOut:   false
   }
@@ -157,14 +168,13 @@ type SampleMeta =
   , palette  :: Int -> String
   , outW     :: Int
   , outH     :: Int
-  , periodic :: Boolean
   }
 
 sampleMetaOf :: SampleDef -> SampleMeta
-sampleMetaOf s = { name: s.name, palette: s.palette, outW: s.outW, outH: s.outH, periodic: s.periodic }
+sampleMetaOf s = { name: s.name, palette: s.palette, outW: s.outW, outH: s.outH }
 
 tileSampleMetaOf :: TileSampleDef -> SampleMeta
-tileSampleMetaOf s = { name: s.name, palette: s.palette, outW: s.outW, outH: s.outH, periodic: s.periodic }
+tileSampleMetaOf s = { name: s.name, palette: s.palette, outW: s.outW, outH: s.outH }
 
 -- Resolves the active *overlapping-model* sample (built-in or uploaded);
 -- meaningless while `tiledMode` is on (image upload only applies there).
@@ -190,10 +200,10 @@ unsafeHead arr = case Array.head arr of
 -- sample source changes (SelectSample/UploadImage/ToggleTiledMode) so the
 -- pattern-size/result-size controls start at a sensible value instead of
 -- carrying over the previous sample's numbers.
-sampleDefaults :: State -> { n :: Int, outW :: Int, outH :: Int }
+sampleDefaults :: State -> { n :: Int, outW :: Int, outH :: Int, periodic :: Boolean }
 sampleDefaults st
-  | st.tiledMode = let ts = currentTileSample st in { n: 1, outW: ts.outW, outH: ts.outH }
-  | otherwise    = let s  = currentSampleDef st  in { n: s.n, outW: s.outW, outH: s.outH }
+  | st.tiledMode = let ts = currentTileSample st in { n: 1, outW: ts.outW, outH: ts.outH, periodic: ts.periodic }
+  | otherwise    = let s  = currentSampleDef st  in { n: s.n, outW: s.outW, outH: s.outH, periodic: s.periodic }
 
 -- What to actually render: the live latest grid, unless the user clicked a
 -- past progress-bar square to review it (`viewedStep`), in which case that
@@ -213,7 +223,9 @@ activeGrid st = case st.viewedStep >>= Array.index st.progressLog of
 patternsStale :: State -> Boolean
 patternsStale st = case st.extractedWith of
   Nothing -> true
-  Just e  -> e.patternSize /= st.patternSize || e.useRotations /= st.useRotations || e.useMirror /= st.useMirror
+  Just e  ->
+    e.patternSize /= st.patternSize || e.useRotations /= st.useRotations || e.useMirror /= st.useMirror
+      || e.inputPeriodic /= st.inputPeriodic
 
 stopCommand :: WP.Command
 stopCommand =
@@ -221,6 +233,7 @@ stopCommand =
   , useBacktracking: false, tiledMode: false
   , patternSize: 1, outW: 1, outH: 1
   , useRotations: false, useMirror: false
+  , inputPeriodic: false, outputPeriodic: false
   }
 
 -- Cancels any in-flight run *and* discards the worker's persistent solving
@@ -242,12 +255,14 @@ buildCommand st kind mode = case st.customImage of
     , useBacktracking: st.useBacktracking, tiledMode: false
     , patternSize: st.patternSize, outW: st.outW, outH: st.outH
     , useRotations: st.useRotations, useMirror: st.useMirror
+    , inputPeriodic: st.inputPeriodic, outputPeriodic: st.outputPeriodic
     }
   _ ->
     { kind, sampleIdx: st.sampleIdx, mode, custom: WP.emptyCustomImage
     , useBacktracking: st.useBacktracking, tiledMode: st.tiledMode
     , patternSize: st.patternSize, outW: st.outW, outH: st.outH
     , useRotations: st.useRotations, useMirror: st.useMirror
+    , inputPeriodic: st.inputPeriodic, outputPeriodic: st.outputPeriodic
     }
 
 runCommand :: State -> String -> WP.Command
@@ -396,7 +411,10 @@ applySampleDefaults :: H.HalogenM State Action Slots Void Aff Unit
 applySampleDefaults = do
   st <- H.get
   let d = sampleDefaults st
-  H.modify_ _ { patternSize = d.n, outW = d.outW, outH = d.outH }
+  H.modify_ _
+    { patternSize = d.n, outW = d.outW, outH = d.outH
+    , inputPeriodic = d.periodic, outputPeriodic = d.periodic
+    }
 
 -- Continues the worker's session if it has one (from earlier Steps, or a
 -- Run that was Stopped) rather than forcing a fresh start — matches Step's
@@ -557,10 +575,28 @@ renderSizeControls st =
                   ]
               , HH.text " Mirror"
               ]
+          , HH.label
+              [ HP.class_ (H.ClassName "size-label") ]
+              [ HH.input
+                  [ HP.type_ HP.InputCheckbox
+                  , HP.checked st.inputPeriodic
+                  , HE.onChecked \_ -> ToggleInputPeriodic
+                  ]
+              , HH.text " Periodic input"
+              ]
           ]
       )
       <>
       [ HH.label
+          [ HP.class_ (H.ClassName "size-label") ]
+          [ HH.input
+              [ HP.type_ HP.InputCheckbox
+              , HP.checked st.outputPeriodic
+              , HE.onChecked \_ -> ToggleOutputPeriodic
+              ]
+          , HH.text " Periodic output"
+          ]
+      , HH.label
           [ HP.class_ (H.ClassName "size-label") ]
           [ HH.text "Result W: "
           , HH.input
@@ -1013,10 +1049,9 @@ handleAction = case _ of
               in Tuple c (buildTiledRules ts.tiles)
             else
               let sample = currentSampleDef st
-                  c      = extractPatterns st.patternSize sample.periodic st.useRotations st.useMirror sample.grid
+                  c      = extractPatterns st.patternSize st.inputPeriodic st.useRotations st.useMirror sample.grid
               in Tuple c (buildRules c)
-        meta = currentSample st
-        wave = initWave cat rules { width: st.outW, height: st.outH } meta.periodic
+        wave = initWave cat rules { width: st.outW, height: st.outH } st.outputPeriodic
     H.modify_ \s -> s
       { status      = Ready
       , catalog     = Just cat
@@ -1027,7 +1062,10 @@ handleAction = case _ of
       , displayGrid = Just (WP.waveToSnapshot cat wave)
       , progressLog = []
       , viewedStep  = Nothing
-      , extractedWith = Just { patternSize: st.patternSize, useRotations: st.useRotations, useMirror: st.useMirror }
+      , extractedWith = Just
+          { patternSize: st.patternSize, useRotations: st.useRotations, useMirror: st.useMirror
+          , inputPeriodic: st.inputPeriodic
+          }
       , stepBackedOut = false
       }
     drawCanvas
@@ -1136,3 +1174,9 @@ handleAction = case _ of
 
   ToggleMirror ->
     H.modify_ \st -> st { useMirror = not st.useMirror }
+
+  ToggleInputPeriodic ->
+    H.modify_ \st -> st { inputPeriodic = not st.inputPeriodic }
+
+  ToggleOutputPeriodic ->
+    H.modify_ \st -> st { outputPeriodic = not st.outputPeriodic }

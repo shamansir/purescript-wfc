@@ -68,6 +68,8 @@ type Command =
   , outH            :: Int     -- result grid height, overrides the sample's own default
   , useRotations    :: Boolean -- overlapping model only; also extract 90°/180°/270° rotations
   , useMirror       :: Boolean -- overlapping model only; also extract the horizontal reflection
+  , inputPeriodic   :: Boolean -- overlapping model only; wrap the source grid when extracting N×N windows
+  , outputPeriodic  :: Boolean -- wrap the output wave's own edges during solving (both models)
   }
 
 -- worker -> main

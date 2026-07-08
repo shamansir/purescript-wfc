@@ -93,14 +93,14 @@ buildFromCommand cmd =
   if cmd.tiledMode then
     let ts = fromMaybe roads (Array.index TileSamples.samples cmd.sampleIdx)
     in { cat: buildTiledCatalog ts.tiles, rules: buildTiledRules ts.tiles
-       , outW: cmd.outW, outH: cmd.outH, periodic: ts.periodic
+       , outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic
        }
   else
     let sample = if cmd.sampleIdx == -1
                    then customSampleDef cmd.custom
                    else fromMaybe checkerboard (Array.index samples cmd.sampleIdx)
-        cat    = extractPatterns cmd.patternSize sample.periodic cmd.useRotations cmd.useMirror sample.grid
-    in { cat, rules: buildRules cat, outW: cmd.outW, outH: cmd.outH, periodic: sample.periodic }
+        cat    = extractPatterns cmd.patternSize cmd.inputPeriodic cmd.useRotations cmd.useMirror sample.grid
+    in { cat, rules: buildRules cat, outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic }
 
 -- Reuse the existing session if one's alive, otherwise build a brand-new
 -- wave/search from `cmd` and stash it — this is what makes an idle worker
