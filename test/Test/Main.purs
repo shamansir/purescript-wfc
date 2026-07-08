@@ -4,6 +4,7 @@ import Prelude
 
 import Data.Array as Array
 import Data.Either (Either(..), isLeft)
+import Data.Foldable (all)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe, isJust)
 import Data.Number (log)
@@ -64,10 +65,19 @@ stripes3x3 =
   , [0, 0, 0]
   ]
 
+-- A single 2×2 window, all 4 pixel values distinct — no rotation or
+-- reflection of it ever equals another, making rotate/mirror variant
+-- counts exact (see the extractPatterns rotation/mirror tests below).
+asymGrid :: Array (Array Int)
+asymGrid =
+  [ [0, 1]
+  , [2, 3]
+  ]
+
 -- Pre-built catalog and rules for the checkerboard fixture.
 -- P0 = PatternId 0, P1 = PatternId 1 (extraction order is deterministic).
 checkerCatalog :: PatternCatalog Int
-checkerCatalog = extractPatterns 2 false 1 checker3x3
+checkerCatalog = extractPatterns 2 false false false checker3x3
 
 checkerRules :: AdjacencyRules
 checkerRules = buildRules checkerCatalog
@@ -206,19 +216,19 @@ main = runSpecAndExitProcess [consoleReporter] do
   -- =========================================================================
 
     it "a uniform grid yields exactly 1 unique pattern" do
-      let cat = extractPatterns 2 false 1 uniform3x3
+      let cat = extractPatterns 2 false false false uniform3x3
       Map.size cat.patterns `shouldEqual` 1
 
     it "a checkerboard yields exactly 2 unique patterns" do
       Map.size checkerCatalog.patterns `shouldEqual` 2
 
     it "horizontal stripes yield exactly 2 unique patterns" do
-      let cat = extractPatterns 2 false 1 stripes3x3
+      let cat = extractPatterns 2 false false false stripes3x3
       Map.size cat.patterns `shouldEqual` 2
 
     it "totalW equals the number of tiles extracted (frequency accounting)" do
       -- 3×3 grid, n=2, non-periodic → 4 tiles; uniform: all same → weight 4
-      let cat = extractPatterns 2 false 1 uniform3x3
+      let cat = extractPatterns 2 false false false uniform3x3
       cat.totalW `shouldEqual` 4.0
 
     it "checkerboard: each pattern appears exactly twice (weight = 2)" do
@@ -230,8 +240,56 @@ main = runSpecAndExitProcess [consoleReporter] do
 
     it "periodic mode wraps the sample and finds more tiles" do
       -- 2×2 periodic checkerboard: all 4 wrapping positions give the 2 patterns
-      let cat = extractPatterns 2 true 1 [[0,1],[1,0]]
+      let cat = extractPatterns 2 true false false [[0,1],[1,0]]
       Map.size cat.patterns `shouldEqual` 2
+
+    -- A single 2×2 window with 4 distinct pixel values: no rotation or
+    -- reflection of it ever coincides with another, so each toggle's
+    -- output count is exact — a clean way to check `variantsFor`'s wiring
+    -- through `extractPatterns` without depending on rotate/reflect's
+    -- internals being separately correct.
+    it "with rotations off and mirror off, only the original window is extracted" do
+      let cat = extractPatterns 2 false false false asymGrid
+      Map.size cat.patterns `shouldEqual` 1
+
+    it "with rotations on, all 4 rotations of an asymmetric window are extracted" do
+      let cat = extractPatterns 2 false true false asymGrid
+      Map.size cat.patterns `shouldEqual` 4
+
+    it "with mirror on, the original and its reflection are extracted" do
+      let cat = extractPatterns 2 false false true asymGrid
+      Map.size cat.patterns `shouldEqual` 2
+
+    it "with both rotations and mirror on, all 8 dihedral variants are extracted" do
+      let cat = extractPatterns 2 false true true asymGrid
+      Map.size cat.patterns `shouldEqual` 8
+
+    it "with neither toggle, no pattern is marked as a rotation/mirror-only origin" do
+      let cat = extractPatterns 2 false false false asymGrid
+      Map.size cat.origins `shouldEqual` 0
+
+    it "with rotations on, exactly the 3 non-base rotations are marked rotated-only" do
+      let cat     = extractPatterns 2 false true false asymGrid
+          origins = Array.fromFoldable (Map.values cat.origins)
+      Map.size cat.origins `shouldEqual` 3
+      origins `shouldSatisfy` all (\o -> o.rotated && not o.mirrored)
+
+    it "with mirror on, exactly the 1 non-base reflection is marked mirrored-only" do
+      let cat     = extractPatterns 2 false false true asymGrid
+          origins = Array.fromFoldable (Map.values cat.origins)
+      Map.size cat.origins `shouldEqual` 1
+      origins `shouldSatisfy` all (\o -> o.mirrored && not o.rotated)
+
+    it "with both on, the 7 non-base variants split 3 rotated / 1 mirrored / 3 both" do
+      let cat        = extractPatterns 2 false true true asymGrid
+          origins    = Array.fromFoldable (Map.values cat.origins)
+          rotOnly    = Array.filter (\o -> o.rotated && not o.mirrored) origins
+          mirOnly    = Array.filter (\o -> o.mirrored && not o.rotated) origins
+          both       = Array.filter (\o -> o.rotated && o.mirrored) origins
+      Map.size cat.origins `shouldEqual` 7
+      Array.length rotOnly `shouldEqual` 3
+      Array.length mirOnly `shouldEqual` 1
+      Array.length both `shouldEqual` 3
 
   -- =========================================================================
   describe "Stage 2 · buildRules — derive adjacency constraints between patterns" do
@@ -249,7 +307,7 @@ main = runSpecAndExitProcess [consoleReporter] do
       nbrs DirD `shouldEqual` [p1]
 
     it "the sole pattern in a uniform grid is compatible with itself in every direction" do
-      let cat   = extractPatterns 2 false 1 uniform3x3
+      let cat   = extractPatterns 2 false false false uniform3x3
           rules = buildRules cat
           nbrs dir = Array.sort $ lookupNeighbors rules dir (PatternId 0)
       nbrs DirL `shouldEqual` [PatternId 0]
@@ -279,7 +337,7 @@ main = runSpecAndExitProcess [consoleReporter] do
 
     it "a uniform wave (1 pattern) is considered fully collapsed from the start" do
       -- With only one possible pattern, every cell is already a singleton set.
-      let cat   = extractPatterns 2 false 1 uniform3x3
+      let cat   = extractPatterns 2 false false false uniform3x3
           rules = buildRules cat
           wave  = initWave cat rules { width: 3, height: 3 } false
       isFullyCollapsed wave `shouldEqual` true
@@ -303,7 +361,7 @@ main = runSpecAndExitProcess [consoleReporter] do
 
     it "minEntropyPos returns Nothing when all cells are already collapsed" do
       -- uniform wave has every cell as a 1-element set → no entropy to minimise
-      let cat   = extractPatterns 2 false 1 uniform3x3
+      let cat   = extractPatterns 2 false false false uniform3x3
           rules = buildRules cat
           wave  = initWave cat rules { width: 3, height: 3 } false
       mPos <- liftEffect $ minEntropyPos wave
@@ -351,7 +409,7 @@ main = runSpecAndExitProcess [consoleReporter] do
 
     it "banning the only tile causes a Contradiction" do
       -- One-pattern catalog → ban that pattern → the cell has no options left.
-      let cat   = extractPatterns 2 false 1 uniform3x3
+      let cat   = extractPatterns 2 false false false uniform3x3
           rules = buildRules cat
           wave  = initWave cat rules { width: 2, height: 2 } false
       isLeft (propagate wave [Tuple (pos 0 0) (PatternId 0)]) `shouldEqual` true
@@ -385,7 +443,7 @@ main = runSpecAndExitProcess [consoleReporter] do
   -- =========================================================================
 
     it "a uniform wave (already collapsed) returns Right immediately" do
-      let cat   = extractPatterns 2 false 1 uniform3x3
+      let cat   = extractPatterns 2 false false false uniform3x3
           rules = buildRules cat
           wave  = initWave cat rules { width: 3, height: 3 } false
       result <- liftEffect $ wfc wave
@@ -504,7 +562,7 @@ main = runSpecAndExitProcess [consoleReporter] do
             , [1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]
             , [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
             ]
-          cat   = extractPatterns 3 false 1 grid
+          cat   = extractPatterns 3 false false false grid
           rules = buildRules cat
           wave  = initWave cat rules { width: 22, height: 22 } false
 

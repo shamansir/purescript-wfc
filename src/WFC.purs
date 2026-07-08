@@ -12,10 +12,10 @@ module WFC
   ) where
 
 import WFC.Algorithm (wfc, wfcWithRetry, step)
-import WFC.Catalog (PatternCatalog, extractPatterns)
+import WFC.Catalog (PatternCatalog, PatternOrigin, extractPatterns)
 import WFC.Direction (Direction(..), allDirections, dirOffset, opposite)
 import WFC.Grid (GridSize, Pos(..), allPositions, neighborPos)
-import WFC.Pattern (Pattern(..), PatternId(..), agrees, rotate, reflect, symmetryVariants)
+import WFC.Pattern (Pattern(..), PatternId(..), VariantTag, agrees, rotate, reflect, variantsFor, taggedVariantsFor)
 import WFC.Propagate (Contradiction(..), BanEvent, propagate)
 import WFC.Render (renderWave, renderWaveWith, topLeftPixel)
 import WFC.Rules (AdjacencyRules(..), buildRules, lookupNeighbors)

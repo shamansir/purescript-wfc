@@ -24,7 +24,7 @@ sampleInput =
 
 main :: Effect Unit
 main = do
-  let catalog = extractPatterns 2 true 1 sampleInput
+  let catalog = extractPatterns 2 true false false sampleInput
       rules   = buildRules catalog
       wave    = initWave catalog rules { width: 8, height: 8 } true
   log $ "Patterns found: " <> show (Array.length (Array.fromFoldable (map (\_ -> unit) [unit])))

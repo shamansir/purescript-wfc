@@ -66,6 +66,8 @@ type Command =
   , patternSize     :: Int     -- overlapping model only (N×N patterns); ignored when tiledMode
   , outW            :: Int     -- result grid width, overrides the sample's own default
   , outH            :: Int     -- result grid height, overrides the sample's own default
+  , useRotations    :: Boolean -- overlapping model only; also extract 90°/180°/270° rotations
+  , useMirror       :: Boolean -- overlapping model only; also extract the horizontal reflection
   }
 
 -- worker -> main

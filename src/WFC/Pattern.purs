@@ -6,6 +6,7 @@ import Data.Array as Array
 import Data.Foldable (class Foldable, foldl, foldr, foldMap, all)
 import Data.Maybe (Maybe, fromJust)
 import Data.Traversable (class Traversable, traverse, sequence)
+import Data.Tuple (Tuple(..))
 import Partial.Unsafe (unsafePartial)
 import WFC.Direction (Direction, dirOffset)
 
@@ -58,19 +59,35 @@ reflect n p = Pattern $ do
   x <- Array.range 0 (n - 1)
   pure $ unsafePatternIndex p ((n - 1 - x) + y * n)
 
--- Up to 8 symmetry variants (rotate + reflect combinations)
-symmetryVariants :: forall a. Int -> Int -> Pattern a -> Array (Pattern a)
-symmetryVariants n count p =
-  Array.take count
-    [ p
-    , reflect n p
-    , rotate n p
-    , reflect n (rotate n p)
-    , rotate n (rotate n p)
-    , reflect n (rotate n (rotate n p))
-    , rotate n (rotate n (rotate n p))
-    , reflect n (rotate n (rotate n (rotate n p)))
-    ]
+-- Whether a variant needed a rotation and/or a mirror to be derived from
+-- the base (untransformed) window — `{ rotated: false, mirrored: false }`
+-- marks the base itself. Used to tell a catalog pattern that only exists
+-- because of the symmetry options apart from one that's also a genuine
+-- unmodified window elsewhere in the sample (see `WFC.Catalog`'s origin
+-- tracking).
+type VariantTag = { rotated :: Boolean, mirrored :: Boolean }
+
+-- Up to 8 symmetry variants, toggled independently: `useRotations` adds the
+-- three 90°/180°/270° rotations of a pattern (and, if `useMirror` is also
+-- on, of its reflection too); `useMirror` adds the horizontal reflection.
+-- Both off returns just the pattern itself, unchanged from before this
+-- became configurable. Each variant is tagged with which transform(s)
+-- produced it, relative to the base window `p`.
+taggedVariantsFor :: forall a. Int -> Boolean -> Boolean -> Pattern a -> Array (Tuple VariantTag (Pattern a))
+taggedVariantsFor n useRotations useMirror p =
+  let rotationsOf base mirrored
+        | useRotations =
+            [ Tuple { rotated: false, mirrored } base
+            , Tuple { rotated: true,  mirrored } (rotate n base)
+            , Tuple { rotated: true,  mirrored } (rotate n (rotate n base))
+            , Tuple { rotated: true,  mirrored } (rotate n (rotate n (rotate n base)))
+            ]
+        | otherwise = [ Tuple { rotated: false, mirrored } base ]
+      mirroredSet = if useMirror then rotationsOf (reflect n p) true else []
+  in rotationsOf p false <> mirroredSet
+
+variantsFor :: forall a. Int -> Boolean -> Boolean -> Pattern a -> Array (Pattern a)
+variantsFor n useRotations useMirror p = map (\(Tuple _ variant) -> variant) (taggedVariantsFor n useRotations useMirror p)
 
 -- Check whether two patterns agree in the overlap region for direction dir.
 -- Implements the "compatible" check from the original WFC overlapping model.

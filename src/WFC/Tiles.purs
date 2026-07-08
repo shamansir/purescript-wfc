@@ -51,7 +51,7 @@ buildTiledCatalog tileDefs =
   let indexed  = Array.mapWithIndex (\i t -> Tuple (PatternId i) t) tileDefs
       patterns = Map.fromFoldable (map (\(Tuple pid t) -> Tuple pid (Pattern [t.value])) indexed)
       weights  = Map.fromFoldable (map (\(Tuple pid t) -> Tuple pid t.weight) indexed)
-      acc      = { nextId: Array.length tileDefs, byPixels: Map.empty, patterns, weights } :: Accum a
+      acc      = { nextId: Array.length tileDefs, byPixels: Map.empty, patterns, weights, origins: Map.empty } :: Accum a
   in finalize acc 1
 
 sidesMatch :: forall a. Direction -> TileDef a -> TileDef a -> Boolean

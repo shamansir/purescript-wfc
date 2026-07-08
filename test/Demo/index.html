@@ -118,6 +118,13 @@
     .controls button:hover:not(:disabled) { background: #30363d; }
     .controls button:disabled { opacity: 0.4; cursor: default; }
 
+    /* Highlights Extract while patterns haven't been (re-)extracted yet
+       for the current sample/settings; cleared once st.catalog is Just. */
+    .controls button.needs-extract {
+      border-color: #58a6ff;
+      box-shadow: 0 0 0 1px #58a6ff;
+    }
+
     .toggle-row {
       display: flex;
       align-items: center;
@@ -222,6 +229,7 @@
     }
 
     .pattern-thumb {
+      position: relative;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -242,6 +250,37 @@
     .pat-label {
       font-size: 9px;
       color: #8b949e;
+    }
+
+    /* ---- Symmetry badges: top-right of each pattern thumbnail ---- */
+    .symmetry-badges {
+      position: absolute;
+      top: -2px;
+      right: -2px;
+      display: flex;
+      gap: 1px;
+    }
+
+    .symmetry-badge {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #21262d;
+      border: 1px solid #30363d;
+      font-size: 8px;
+      line-height: 1;
+      color: #c9d1d9;
+    }
+
+    .symmetry-badge.rotate {
+      color: #58a6ff;
+    }
+
+    .symmetry-badge.mirror {
+      color: #f0c000;
     }
 
     /* ---- Main view ---- */

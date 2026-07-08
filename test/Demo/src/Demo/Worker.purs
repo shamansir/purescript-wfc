@@ -64,7 +64,7 @@ handleMessage tokenRef ev = do
               let sample = if cmd.sampleIdx == -1
                              then customSampleDef cmd.custom
                              else fromMaybe checkerboard (Array.index samples cmd.sampleIdx)
-                  cat    = extractPatterns cmd.patternSize sample.periodic 1 sample.grid
+                  cat    = extractPatterns cmd.patternSize sample.periodic cmd.useRotations cmd.useMirror sample.grid
               in { cat, rules: buildRules cat, outW: cmd.outW, outH: cmd.outH, periodic: sample.periodic }
           wave0 = initWave built.cat built.rules { width: built.outW, height: built.outH } built.periodic
       t0 <- now

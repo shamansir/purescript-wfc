@@ -1,6 +1,7 @@
 module Demo.ImageUpload
   ( LoadedImage
   , loadImageAsSample
+  , loadImageFromUrl
   , gridFromPixels
   ) where
 
@@ -14,6 +15,7 @@ import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.String as String
 import Effect.Aff (Aff, makeAff, nonCanceler)
+import Effect.Class (liftEffect)
 import Graphics.Canvas (CanvasImageSource, ImageData)
 import Graphics.Canvas as Canvas
 import Web.File.File (File)
@@ -71,15 +73,17 @@ gridFromPixels w h bytes =
       grid     = map rowOf (Array.range 0 (h - 1))
   in { grid, colors: built.palette }
 
--- Decode an uploaded file into a pattern-source grid. Always resolves with
--- an `Either` — a bad/oversized file is data (`Left`), not a thrown Aff
--- error, so callers just pattern-match instead of handling two failure
--- channels.
-loadImageAsSample :: Int -> File -> Aff (Either String LoadedImage)
-loadImageAsSample maxSide file = makeAff \respond -> do
-  url <- Url.createObjectURL (File.toBlob file)
+-- Decode whatever `<img>` can load `url` as into a pattern-source grid.
+-- Shared by `loadImageAsSample` (an `object:` URL backed by an uploaded
+-- File) and `loadImageFromUrl` (a plain static asset path) — from here on
+-- both are just "some URL an `<img>` can fetch", decoded the same way.
+-- Always resolves with an `Either` — a bad/oversized/missing image is data
+-- (`Left`), not a thrown Aff error, so callers just pattern-match instead
+-- of handling two failure channels.
+decodeImageUrl :: Int -> String -> String -> Aff (Either String LoadedImage)
+decodeImageUrl maxSide url name = makeAff \respond -> do
   Canvas.tryLoadImage url case _ of
-    Nothing -> respond (Right (Left "Could not decode image file"))
+    Nothing -> respond (Right (Left ("Could not load image: " <> url)))
     Just imgSrc -> do
       let w = naturalWidth imgSrc
           h = naturalHeight imgSrc
@@ -101,7 +105,19 @@ loadImageAsSample maxSide file = makeAff \respond -> do
             imageData <- Canvas.getImageData ctx 0.0 0.0 (Int.toNumber w) (Int.toNumber h)
             let bytes = imageDataToArray imageData
                 built = gridFromPixels w h bytes
-            Url.revokeObjectURL url
             respond (Right (Right
-              { grid: built.grid, colors: built.colors, width: w, height: h, name: File.name file }))
+              { grid: built.grid, colors: built.colors, width: w, height: h, name }))
   pure nonCanceler
+
+-- Decode a user-uploaded file.
+loadImageAsSample :: Int -> File -> Aff (Either String LoadedImage)
+loadImageAsSample maxSide file = do
+  url <- liftEffect (Url.createObjectURL (File.toBlob file))
+  result <- decodeImageUrl maxSide url (File.name file)
+  liftEffect (Url.revokeObjectURL url)
+  pure result
+
+-- Decode a static asset served alongside the demo (e.g. `samples/Knot.png`)
+-- — no File/Blob/object-URL involved, `<img>` just fetches it directly.
+loadImageFromUrl :: Int -> String -> String -> Aff (Either String LoadedImage)
+loadImageFromUrl = decodeImageUrl

@@ -8,8 +8,15 @@ import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe, fromJust)
 import Data.Number (log)
+import Data.Tuple (Tuple(..))
 import Partial.Unsafe (unsafePartial)
-import WFC.Pattern (Pattern(..), PatternId(..), symmetryVariants)
+import WFC.Pattern (Pattern(..), PatternId(..), VariantTag, taggedVariantsFor)
+
+-- Whether a catalog pattern only exists because of the rotation/mirror
+-- symmetry options, and if so, which transform(s) produced it. A pattern
+-- that also occurs as a genuine unmodified window somewhere in the sample
+-- is never in this map — see `originFromTag`/`mergeOrigin` below.
+type PatternOrigin = { rotated :: Boolean, mirrored :: Boolean }
 
 -- All pattern data derived from the input sample.
 -- Constructed only via extractPatterns.
@@ -21,6 +28,24 @@ type PatternCatalog a =
   , totalW       :: Number                      -- Σ weights
   , totalWLogW   :: Number                      -- Σ (w * ln w)
   , startEntropy :: Number                      -- initial entropy for all cells
+  , origins      :: Map PatternId PatternOrigin -- only rotation/mirror-only patterns
+  }
+
+-- Per-pattern bookkeeping while accumulating: has this exact pixel content
+-- ever been seen as a base (untransformed) window, and has it ever been
+-- seen via a rotation and/or a mirror — tracked separately because the
+-- same content can arise both ways (e.g. a plain window here, a rotated
+-- variant of a different window there).
+type OriginAcc = { sawOriginal :: Boolean, rotated :: Boolean, mirrored :: Boolean }
+
+originFromTag :: VariantTag -> OriginAcc
+originFromTag tag = { sawOriginal: not tag.rotated && not tag.mirrored, rotated: tag.rotated, mirrored: tag.mirrored }
+
+mergeOrigin :: OriginAcc -> OriginAcc -> OriginAcc
+mergeOrigin a b =
+  { sawOriginal: a.sawOriginal || b.sawOriginal
+  , rotated:     a.rotated || b.rotated
+  , mirrored:    a.mirrored || b.mirrored
   }
 
 type Accum a =
@@ -28,16 +53,20 @@ type Accum a =
   , byPixels :: Map (Pattern a) PatternId
   , patterns :: Map PatternId (Pattern a)
   , weights  :: Map PatternId Number
+  , origins  :: Map PatternId OriginAcc
   }
 
 emptyAccum :: forall a. Accum a
-emptyAccum = { nextId: 0, byPixels: Map.empty, patterns: Map.empty, weights: Map.empty }
+emptyAccum = { nextId: 0, byPixels: Map.empty, patterns: Map.empty, weights: Map.empty, origins: Map.empty }
 
-accumulatePattern :: forall a. Ord a => Accum a -> Pattern a -> Accum a
-accumulatePattern acc pat =
+accumulatePattern :: forall a. Ord a => Accum a -> VariantTag -> Pattern a -> Accum a
+accumulatePattern acc tag pat =
   case Map.lookup pat acc.byPixels of
     Just pid ->
-      acc { weights = Map.insertWith (+) pid 1.0 acc.weights }
+      acc
+        { weights = Map.insertWith (+) pid 1.0 acc.weights
+        , origins = Map.insertWith mergeOrigin pid (originFromTag tag) acc.origins
+        }
     Nothing ->
       let pid = PatternId acc.nextId
       in acc
@@ -45,6 +74,7 @@ accumulatePattern acc pat =
         , byPixels = Map.insert pat pid acc.byPixels
         , patterns = Map.insert pid pat acc.patterns
         , weights  = Map.insert pid 1.0 acc.weights
+        , origins  = Map.insert pid (originFromTag tag) acc.origins
         }
 
 finalize :: forall a. Accum a -> Int -> PatternCatalog a
@@ -57,7 +87,12 @@ finalize acc n =
         if totalW > 0.0
           then log totalW - totalWLogW / totalW
           else 0.0
-  in { patterns: acc.patterns, weights, wLogW, size: n, totalW, totalWLogW, startEntropy }
+      origins = Map.mapMaybe
+        (\o -> if not o.sawOriginal && (o.rotated || o.mirrored)
+                 then Just { rotated: o.rotated, mirrored: o.mirrored }
+                 else Nothing)
+        acc.origins
+  in { patterns: acc.patterns, weights, wLogW, size: n, totalW, totalWLogW, startEntropy, origins }
 
 -- Extract the pixel at position (x, y) from the input grid, with optional wrapping.
 sampleAt :: forall a. Int -> Int -> Boolean -> Array (Array a) -> Int -> Int -> a
@@ -75,17 +110,20 @@ patternAt n periodic w h grid px py = Pattern $ do
   pure $ sampleAt w h periodic grid (px + dx) (py + dy)
 
 -- Extract all patterns from the input grid.
---   n         — pattern size (N×N)
---   periodic  — whether to wrap at edges
---   symmetry  — how many of the 8 symmetry variants to include (1–8)
+--   n             — pattern size (N×N)
+--   periodic      — whether to wrap at edges
+--   useRotations  — also extract each window's 90°/180°/270° rotations
+--   useMirror     — also extract each window's horizontal reflection
+--                    (combined with useRotations, its rotations too)
 extractPatterns
   :: forall a. Ord a
   => Int
   -> Boolean
-  -> Int
+  -> Boolean
+  -> Boolean
   -> Array (Array a)
   -> PatternCatalog a
-extractPatterns n periodic symmetry grid =
+extractPatterns n periodic useRotations useMirror grid =
   let h = Array.length grid
       w = fromMaybe 0 (map Array.length (Array.head grid))
       -- Valid top-left corners for pattern extraction
@@ -96,6 +134,6 @@ extractPatterns n periodic symmetry grid =
         x <- Array.range 0 (xMax - 1)
         pure { x, y }
       allVariants = positions >>= \{ x, y } ->
-        symmetryVariants n symmetry (patternAt n periodic w h grid x y)
-      acc = foldl accumulatePattern emptyAccum allVariants
+        taggedVariantsFor n useRotations useMirror (patternAt n periodic w h grid x y)
+      acc = foldl (\a (Tuple tag pat) -> accumulatePattern a tag pat) emptyAccum allVariants
   in finalize acc n

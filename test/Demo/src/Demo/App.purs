@@ -8,7 +8,7 @@ import Data.Either (Either(..))
 import Data.Foldable (for_)
 import Data.Int as Int
 import Data.Map as Map
-import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Maybe (Maybe(..), fromMaybe, isJust)
 import Data.Time.Duration (Milliseconds(..))
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
@@ -22,6 +22,7 @@ import Halogen.HTML.Properties as HP
 import Halogen.Subscription as HS
 import Unsafe.Coerce (unsafeCoerce)
 
+import Demo.ImageSamples (imageSamples)
 import Demo.ImageUpload as ImageUpload
 import Demo.Samples (SampleDef, checkerboard, samples)
 import Demo.TileSamples (TileSampleDef)
@@ -76,6 +77,8 @@ type State =
   , patternSize     :: Int -- overlapping model only; ignored (fixed at 1) in tiled mode
   , outW            :: Int -- result grid width; defaults to the active sample's own outW
   , outH            :: Int -- result grid height; defaults to the active sample's own outH
+  , useRotations    :: Boolean -- overlapping model only; also extract 90/180/270 rotations
+  , useMirror       :: Boolean -- overlapping model only; also extract the horizontal reflection
   }
 
 data Action
@@ -97,6 +100,8 @@ data Action
   | SetPatternSize Int
   | SetOutW Int
   | SetOutH Int
+  | ToggleRotations
+  | ToggleMirror
 
 type Slots :: forall k. Row k
 type Slots = ()
@@ -130,6 +135,8 @@ initialState =
   , patternSize:     checkerboard.n
   , outW:            checkerboard.outW
   , outH:            checkerboard.outH
+  , useRotations:    false
+  , useMirror:       false
   }
 
 -- ---------------------------------------------------------------------------
@@ -208,6 +215,7 @@ stopCommand =
   { kind: "stop", sampleIdx: 0, mode: "", custom: WP.emptyCustomImage
   , useBacktracking: false, tiledMode: false
   , patternSize: 1, outW: 1, outH: 1
+  , useRotations: false, useMirror: false
   }
 
 runCommand :: State -> String -> WP.Command
@@ -216,11 +224,13 @@ runCommand st mode = case st.customImage of
     { kind: "run", sampleIdx: -1, mode, custom: ci
     , useBacktracking: st.useBacktracking, tiledMode: false
     , patternSize: st.patternSize, outW: st.outW, outH: st.outH
+    , useRotations: st.useRotations, useMirror: st.useMirror
     }
   _ ->
     { kind: "run", sampleIdx: st.sampleIdx, mode, custom: WP.emptyCustomImage
     , useBacktracking: st.useBacktracking, tiledMode: st.tiledMode
     , patternSize: st.patternSize, outW: st.outW, outH: st.outH
+    , useRotations: st.useRotations, useMirror: st.useMirror
     }
 
 -- Fields shared by "switch to a different sample" (built-in or uploaded):
@@ -247,6 +257,13 @@ resetRunState s = s
 -- non-periodic, output scaled up 3x within a sane runtime-cost range.
 clampInt :: Int -> Int -> Int -> Int
 clampInt lo hi n = max lo (min hi n)
+
+-- The bundled reference images (Demo.ImageSamples) are known-good and
+-- larger than the 32×32 cap enforced on user uploads (Font.png is 267×15)
+-- — generous enough to cover all of them without being a meaningful attack
+-- surface, unlike an arbitrary user-supplied file.
+builtinImageMaxSide :: Int
+builtinImageMaxSide = 300
 
 customImageFrom :: ImageUpload.LoadedImage -> WP.CustomImage
 customImageFrom loaded =
@@ -386,7 +403,7 @@ renderSidebar st =
   let sampleNames =
         if st.tiledMode
           then map _.name TileSamples.samples
-          else map _.name samples
+          else map _.name samples <> map _.name imageSamples
   in
   HH.div
     [ HP.class_ (H.ClassName "sidebar") ]
@@ -483,6 +500,24 @@ renderSizeControls st =
                   [ HE.onSelectedIndexChange (\i -> SetPatternSize (i + 1)) ]
                   (map (renderSizeOption st.patternSize) [ 1, 2, 3, 4 ])
               ]
+          , HH.label
+              [ HP.class_ (H.ClassName "size-label") ]
+              [ HH.input
+                  [ HP.type_ HP.InputCheckbox
+                  , HP.checked st.useRotations
+                  , HE.onChecked \_ -> ToggleRotations
+                  ]
+              , HH.text " Rotate"
+              ]
+          , HH.label
+              [ HP.class_ (H.ClassName "size-label") ]
+              [ HH.input
+                  [ HP.type_ HP.InputCheckbox
+                  , HP.checked st.useMirror
+                  , HE.onChecked \_ -> ToggleMirror
+                  ]
+              , HH.text " Mirror"
+              ]
           ]
       )
       <>
@@ -557,11 +592,13 @@ renderTilePreview ts =
 
 -- Stays in the left sidebar: controls that pick/build the sample source.
 renderSourceControls :: State -> H.ComponentHTML Action Slots Aff
-renderSourceControls _ =
+renderSourceControls st =
   HH.div
     [ HP.class_ (H.ClassName "controls") ]
     [ HH.button
-        [ HE.onClick \_ -> ExtractPatterns ]
+        [ HE.onClick \_ -> ExtractPatterns
+        , HP.class_ (H.ClassName (if isJust st.catalog then "" else "needs-extract"))
+        ]
         [ HH.text "◫ Extract" ]
     ]
 
@@ -741,7 +778,11 @@ renderPatterns st =
             [ HE.onClick \_ -> TogglePatterns
             , HP.class_ (H.ClassName "toggle-btn")
             ]
-            [ HH.text (if st.showPats then "▲ Patterns" else "▼ Patterns") ]
+            [ HH.text
+                ( (if st.showPats then "▲ Patterns (" else "▼ Patterns (")
+                  <> show (Map.size cat.patterns) <> ")"
+                )
+            ]
         , if st.showPats
             then
               HH.div
@@ -774,10 +815,34 @@ renderPatThumb st cat (Tuple pid (Pattern px)) =
         , HP.style ("grid-template-columns: repeat(" <> show n <> ", 1fr);")
         ]
         cells
+    , renderSymmetryBadges cat pid
     , HH.div
         [ HP.class_ (H.ClassName "pat-label") ]
         [ HH.text (show pid) ]
     ]
+
+-- Top-right badges on a pattern thumbnail — only for patterns that only
+-- exist in the catalog *because* of the rotation/mirror options
+-- (`cat.origins`; see `WFC.Catalog`'s origin tracking). A pattern that also
+-- occurs as a genuine unmodified window elsewhere in the sample is treated
+-- as original and gets no badge, even if rotations/mirroring are on.
+renderSymmetryBadges :: PatternCatalog Int -> PatternId -> H.ComponentHTML Action Slots Aff
+renderSymmetryBadges cat pid =
+  case Map.lookup pid cat.origins of
+    Nothing -> HH.text ""
+    Just o ->
+      HH.div
+        [ HP.class_ (H.ClassName "symmetry-badges") ]
+        ( (if o.rotated then [ badge "rotate" "↻" "Rotated variant" ] else [])
+          <> (if o.mirrored then [ badge "mirror" "⇋" "Mirrored variant" ] else [])
+        )
+  where
+  badge cls glyph tip =
+    HH.span
+      [ HP.class_ (H.ClassName ("symmetry-badge " <> cls))
+      , HP.title tip
+      ]
+      [ HH.text glyph ]
 
 renderMain :: State -> H.ComponentHTML Action Slots Aff
 renderMain st =
@@ -856,7 +921,22 @@ handleAction = case _ of
       , customImage = Nothing
       , uploadError = Nothing
       }
-    applySampleDefaults
+    if not st.tiledMode && idx >= Array.length samples
+      then
+        -- Indices past the hand-authored `samples` list are the bundled
+        -- reference images (Demo.ImageSamples) — decode the same way an
+        -- uploaded file would be, just fetched from a static path instead
+        -- of a File/Blob.
+        case Array.index imageSamples (idx - Array.length samples) of
+          Nothing  -> applySampleDefaults
+          Just def -> do
+            result <- H.liftAff (ImageUpload.loadImageFromUrl builtinImageMaxSide def.path def.name)
+            case result of
+              Left err     -> H.modify_ _ { uploadError = Just err }
+              Right loaded -> H.modify_ _ { customImage = Just (customImageFrom loaded) }
+            applySampleDefaults
+      else
+        applySampleDefaults
     drawCanvas
 
   UploadImage ev -> do
@@ -892,7 +972,7 @@ handleAction = case _ of
               in Tuple c (buildTiledRules ts.tiles)
             else
               let sample = currentSampleDef st
-                  c      = extractPatterns st.patternSize sample.periodic 1 sample.grid
+                  c      = extractPatterns st.patternSize sample.periodic st.useRotations st.useMirror sample.grid
               in Tuple c (buildRules c)
         meta = currentSample st
         wave = initWave cat rules { width: st.outW, height: st.outH } meta.periodic
@@ -1049,3 +1129,9 @@ handleAction = case _ of
 
   SetOutH h ->
     H.modify_ _ { outH = h }
+
+  ToggleRotations ->
+    H.modify_ \st -> st { useRotations = not st.useRotations }
+
+  ToggleMirror ->
+    H.modify_ \st -> st { useMirror = not st.useMirror }
