@@ -28,7 +28,7 @@ nix run
 
 ## Project Overview
 
-PureScript implementation of the **Wave Function Collapse** (WFC) algorithm. WFC is a constraint-propagation algorithm for procedural generation — given a set of tiles and adjacency rules, it collapses a grid of superposed states into a consistent assignment.
+PureScript implementation of the **Wave Function Collapse** (WFC) algorithm. WFC is a constraint-propagation algorithm for procedural generation — given a set of tiles and adjacency rules, it collapses a grid of superposed states into a consistent assignment. See [`context/WFC.md`](context/WFC.md) for a language-independent explanation of the algorithm itself.
 
 Output targets a web frontend (`./web/` dir) served via `serve-demo-games-nix.sh`. Bundler chain: `purs` → `purs-backend-es` → `esbuild`.
 

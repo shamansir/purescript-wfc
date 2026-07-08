@@ -39,7 +39,8 @@ buildRules catalog =
 
 -- Initial compatibility count for (pid, dir) at any position:
 -- how many tiles in the neighbor in direction dir can support pid.
--- = |propagator[opposite(dir)][pid]|
+-- = |propagator[dir][pid]| — the set of patterns pid allows as its
+-- direction-dir neighbour, before any of them have been ruled out.
 initialCompatCount :: AdjacencyRules -> PatternId -> Direction -> Int
 initialCompatCount (AdjacencyRules rules) pid dir =
   fromMaybe 0 $ do
