@@ -102,15 +102,17 @@ runLoop tokenRef myToken mode t0 stepIdx solvedSoFar wave = do
           else do
             let fresh = initWave wave.catalog wave.rules wave.size wave.periodic
             liftEffect $ Scope.postMessage $ emptyProgress
-              { kind        = "progress"
-              , step        = stepIdx + 1
-              , solvedTotal = solvedSoFar
-              , totalCells  = totalCellCount snap
-              , elapsedMs   = elapsed
-              , restarted   = true
-              , contraX     = p.x
-              , contraY     = p.y
-              , grid        = snap
+              { kind           = "progress"
+              , step           = stepIdx + 1
+              , solvedTotal    = solvedSoFar
+              , totalCells     = totalCellCount snap
+              , elapsedMs      = elapsed
+              , restarted      = true
+              , rowBreak       = true
+              , rowStartColumn = 0
+              , contraX        = p.x
+              , contraY        = p.y
+              , grid           = snap
               }
             delay (Milliseconds 0.0)
             runLoop tokenRef myToken mode t0 (stepIdx + 1) 0 fresh
@@ -156,7 +158,34 @@ runBacktrackLoop tokenRef myToken mode wave0 t0 stepIdx solvedSoFar result = do
     then pure unit -- stopped, or superseded by a newer run
     else do
       tNow <- liftEffect now
-      let elapsed = timeDiff t0 tNow
+      let
+        elapsed = timeDiff t0 tNow
+
+        -- Shared by `Continue`/`BackedOut`: post this step's snapshot, then
+        -- fetch and recurse on the next one. `backedOut` marks a
+        -- backtracking pop — the depth resumed at (`NonEmpty.length
+        -- st.stack`, the frame count *after* popping) becomes the column
+        -- the next history row starts at, so the history reads like a
+        -- search tree rather than one flat sequence.
+        advance st backedOut = do
+          let wave  = (NonEmpty.uncons st.stack).head.wave
+              snap  = waveToSnapshot wave.catalog wave
+              total = solvedCount snap
+          liftEffect $ Scope.postMessage $ emptyProgress
+            { kind           = "progress"
+            , step           = stepIdx + 1
+            , solvedDelta    = total - solvedSoFar
+            , solvedTotal    = total
+            , totalCells     = totalCellCount snap
+            , elapsedMs      = elapsed
+            , rowBreak       = backedOut
+            , rowStartColumn = if backedOut then NonEmpty.length st.stack else 0
+            , grid           = snap
+            }
+          delay (Milliseconds 0.0)
+          next <- liftEffect (Backtrack.stepSearch st)
+          runBacktrackLoop tokenRef myToken mode wave0 t0 (stepIdx + 1) total next
+
       case result of
         Failed (Contradiction (Pos p)) ->
           if mode == "once" then
@@ -170,13 +199,15 @@ runBacktrackLoop tokenRef myToken mode wave0 t0 stepIdx solvedSoFar result = do
               }
           else do
             liftEffect $ Scope.postMessage $ emptyProgress
-              { kind        = "progress"
-              , step        = stepIdx + 1
-              , solvedTotal = solvedSoFar
-              , elapsedMs   = elapsed
-              , restarted   = true
-              , contraX     = p.x
-              , contraY     = p.y
+              { kind           = "progress"
+              , step           = stepIdx + 1
+              , solvedTotal    = solvedSoFar
+              , elapsedMs      = elapsed
+              , restarted      = true
+              , rowBreak       = true
+              , rowStartColumn = 0
+              , contraX        = p.x
+              , contraY        = p.y
               }
             delay (Milliseconds 0.0)
             fresh <- liftEffect (Backtrack.initSearch wave0)
@@ -195,19 +226,5 @@ runBacktrackLoop tokenRef myToken mode wave0 t0 stepIdx solvedSoFar result = do
             , grid        = snap
             }
 
-        Continue st -> do
-          let wave  = (NonEmpty.uncons st.stack).head.wave
-              snap  = waveToSnapshot wave.catalog wave
-              total = solvedCount snap
-          liftEffect $ Scope.postMessage $ emptyProgress
-            { kind        = "progress"
-            , step        = stepIdx + 1
-            , solvedDelta = total - solvedSoFar
-            , solvedTotal = total
-            , totalCells  = totalCellCount snap
-            , elapsedMs   = elapsed
-            , grid        = snap
-            }
-          delay (Milliseconds 0.0)
-          next <- liftEffect (Backtrack.stepSearch st)
-          runBacktrackLoop tokenRef myToken mode wave0 t0 (stepIdx + 1) total next
+        Continue st -> advance st false
+        BackedOut st -> advance st true

@@ -72,6 +72,7 @@ type State =
   , uploadError   :: Maybe String
   , useBacktracking :: Boolean
   , tiledMode       :: Boolean
+  , viewedStep      :: Maybe Int
   }
 
 data Action
@@ -89,6 +90,7 @@ data Action
   | TogglePatterns
   | ToggleBacktracking
   | ToggleTiledMode
+  | ViewStep Int
 
 type Slots :: forall k. Row k
 type Slots = ()
@@ -118,6 +120,7 @@ initialState =
   , uploadError:   Nothing
   , useBacktracking: false
   , tiledMode:       false
+  , viewedStep:      Nothing
   }
 
 -- ---------------------------------------------------------------------------
@@ -172,6 +175,16 @@ unsafeHead arr = case Array.head arr of
   Just x  -> x
   Nothing -> unsafeHead arr  -- should never happen for non-empty arrays
 
+-- What to actually render: the live latest grid, unless the user clicked a
+-- past progress-bar square to review it (`viewedStep`), in which case that
+-- step's own snapshot wins instead — a live-updating run keeps appending to
+-- `progressLog`/`displayGrid` underneath regardless, so clicking back to
+-- "now" is just clicking the newest square again.
+activeGrid :: State -> Maybe Grid
+activeGrid st = case st.viewedStep >>= Array.index st.progressLog of
+  Just p  -> Just p.grid
+  Nothing -> st.displayGrid
+
 stopCommand :: WP.Command
 stopCommand =
   { kind: "stop", sampleIdx: 0, mode: "", custom: WP.emptyCustomImage
@@ -205,6 +218,7 @@ resetRunState s = s
   , stopRequested = true
   , displayGrid   = Nothing
   , progressLog   = []
+  , viewedStep    = Nothing
   }
 
 -- Reasonable defaults for a freshly-decoded upload: N=3 when the image is at
@@ -240,7 +254,7 @@ drawCanvasEffect st = do
       Canvas.clearRect ctx { x: 0.0, y: 0.0, width: cw, height: ch }
       Canvas.setFillStyle ctx "#1a1a2e"
       Canvas.fillRect ctx { x: 0.0, y: 0.0, width: cw, height: ch }
-      case st.displayGrid of
+      case activeGrid st of
         Nothing   -> pure unit
         Just grid -> do
           let height = Array.length grid
@@ -304,6 +318,7 @@ startRun mode = do
     , status        = Stepped
     , progressLog   = []
     , displayGrid   = Nothing
+    , viewedStep    = Nothing
     }
   H.liftEffect $ Worker.postMessage (runCommand st mode) w
 
@@ -331,8 +346,11 @@ render st =
     [ HP.class_ (H.ClassName "demo") ]
     [ renderSidebar st
     , renderMain st
+    , renderRunPanel st
     ]
 
+-- Sample source: picking/building/inspecting the pattern source, not
+-- running it — select, mode toggles, upload, Extract/Patterns, pattern list.
 renderSidebar :: State -> H.ComponentHTML Action Slots Aff
 renderSidebar st =
   let sampleNames =
@@ -347,10 +365,22 @@ renderSidebar st =
         (Array.mapWithIndex renderOption sampleNames)
     , renderModeToggle st
     , if st.tiledMode then HH.text "" else renderUpload st
-    , renderButtons st
+    , renderSourcePreview st
+    , renderSourceControls st
+    , renderPatterns st
+    ]
+
+-- Running/observing an already-extracted wave — Step/Reset/Run/Stop, the
+-- backtracking toggle, status info, and the step history. To the right of
+-- the canvas/table on desktop widths (see index.html's media query);
+-- stacks below on mobile.
+renderRunPanel :: State -> H.ComponentHTML Action Slots Aff
+renderRunPanel st =
+  HH.div
+    [ HP.class_ (H.ClassName "run-panel") ]
+    [ renderRunControls st
     , renderStats st
     , renderProgress st
-    , renderPatterns st
     ]
 
 -- Switches the sample source between the overlapping model (image-derived
@@ -405,22 +435,64 @@ renderOption i name =
     [ HP.value (show i) ]
     [ HH.text name ]
 
-renderButtons :: State -> H.ComponentHTML Action Slots Aff
-renderButtons st =
+-- What Extract actually reads from: the raw source grid (built-in sample
+-- or uploaded image) for the overlapping model, or the raw tile set for
+-- the tiled model — shown as-is, before any patterns get extracted from
+-- it, so the dropdown/upload/tiled-mode choice is visible up front instead
+-- of only showing up once you've already clicked Extract.
+renderSourcePreview :: State -> H.ComponentHTML Action Slots Aff
+renderSourcePreview st
+  | st.tiledMode = renderTilePreview (currentTileSample st)
+  | otherwise    = renderGridPreview (currentSampleDef st)
+
+renderGridPreview :: SampleDef -> H.ComponentHTML Action Slots Aff
+renderGridPreview sample =
+  HH.div
+    [ HP.class_ (H.ClassName "source-preview") ]
+    [ HH.div [ HP.class_ (H.ClassName "source-label") ] [ HH.text ("Source: " <> sample.name) ]
+    , HH.table
+        [ HP.class_ (H.ClassName "source-grid") ]
+        (map (\row -> HH.tr_ (map renderSourceCell row)) sample.grid)
+    ]
+  where
+  renderSourceCell v = HH.td [ HP.style ("background:" <> sample.palette v <> ";") ] []
+
+renderTilePreview :: TileSampleDef -> H.ComponentHTML Action Slots Aff
+renderTilePreview ts =
+  HH.div
+    [ HP.class_ (H.ClassName "source-preview") ]
+    [ HH.div [ HP.class_ (H.ClassName "source-label") ] [ HH.text ("Source: " <> ts.name) ]
+    , HH.div
+        [ HP.class_ (H.ClassName "tile-list") ]
+        (map (\t -> HH.div
+                [ HP.class_ (H.ClassName "tile-swatch")
+                , HP.style ("background:" <> ts.palette t.value <> ";")
+                , HP.title (show t.value)
+                ]
+                []
+             ) ts.tiles)
+    ]
+
+-- Stays in the left sidebar: controls that pick/build the sample source.
+renderSourceControls :: State -> H.ComponentHTML Action Slots Aff
+renderSourceControls _ =
+  HH.div
+    [ HP.class_ (H.ClassName "controls") ]
+    [ HH.button
+        [ HE.onClick \_ -> ExtractPatterns ]
+        [ HH.text "◫ Extract" ]
+    ]
+
+-- Moves to the right-hand run panel (desktop) / below main view (mobile):
+-- controls that drive/observe an already-extracted wave.
+renderRunControls :: State -> H.ComponentHTML Action Slots Aff
+renderRunControls st =
   let notReady   = st.status == Idle
       noStepsTaken = st.status == Idle || st.status == Ready
   in
   HH.div
     [ HP.class_ (H.ClassName "controls") ]
     [ HH.button
-        [ HE.onClick \_ -> ExtractPatterns ]
-        [ HH.text "◫ Extract" ]
-    , HH.button
-        [ HE.onClick \_ -> TogglePatterns
-        , HP.disabled notReady
-        ]
-        [ HH.text "⊞ Patterns" ]
-    , HH.button
         [ HE.onClick \_ -> StepOnce
         , HP.disabled (notReady || st.running)
         ]
@@ -484,26 +556,70 @@ renderStats st =
     , HH.div_ [ HH.text statsStr ]
     ]
 
--- Horizontal strip of squares, one per step reported so far; persists until
--- the next run clears it. Hover shows step/solved/elapsed detail.
+-- One history row per "cycle": the run so far, until either a full restart
+-- (`restarted`, always starts the next row at column 0) or — in
+-- backtracking mode — an individual backtrack pop (`rowBreak` with
+-- `rowStartColumn` set to the search depth resumed at), which starts the
+-- next row partway across instead, so the history reads like a search
+-- tree: rightward = forward progress, a row starting mid-way = "returned
+-- to here and tried a different branch."
+type HistoryRow = { startColumn :: Int, cells :: Array (Tuple Int WP.Progress) }
+
+buildHistoryRows :: Array WP.Progress -> Array HistoryRow
+buildHistoryRows entries =
+  case Array.uncons (Array.mapWithIndex Tuple entries) of
+    Nothing -> []
+    Just { head: first, tail: rest } ->
+      let initAcc = { rows: ([] :: Array HistoryRow), current: { startColumn: 0, cells: [ first ] } }
+          step acc cell@(Tuple _ p) =
+            if p.rowBreak
+              then acc { rows = Array.snoc acc.rows acc.current
+                       , current = { startColumn: p.rowStartColumn, cells: [ cell ] }
+                       }
+              else acc { current = acc.current { cells = Array.snoc acc.current.cells cell } }
+          final = Array.foldl step initAcc rest
+      in Array.snoc final.rows final.current
+
+-- One square per step reported so far, green-shaded by percent of cells
+-- solved at that step (red for a contradiction); click one to freeze the
+-- canvas/table on that step's grid (`activeGrid`) — a live run keeps
+-- appending squares underneath regardless, so clicking the newest one
+-- again jumps back to "now". Persists until Reset, a new run, or Extract
+-- clears it.
 renderProgress :: State -> H.ComponentHTML Action Slots Aff
 renderProgress st =
-  if Array.null st.progressLog
+  let rows = buildHistoryRows st.progressLog
+  in
+  if Array.null rows
     then HH.text ""
     else
       HH.div
-        [ HP.class_ (H.ClassName "progress-bar") ]
-        (Array.mapWithIndex (\_ p -> renderProgressCell p) st.progressLog)
+        [ HP.class_ (H.ClassName "history-block") ]
+        (map (renderHistoryRow st.viewedStep) rows)
 
-renderProgressCell :: WP.Progress -> H.ComponentHTML Action Slots Aff
-renderProgressCell p =
-  let intensity  = min 1.0 (Int.toNumber p.solvedDelta / 10.0)
-      lightness  = 22 + Int.floor (intensity * 55.0)
-      isContra   = p.kind == "contradiction"
-      bg         = if isContra then "#ff4444" else "hsl(210, 70%, " <> show lightness <> "%)"
+renderHistoryRow :: Maybe Int -> HistoryRow -> H.ComponentHTML Action Slots Aff
+renderHistoryRow viewedStep row =
+  HH.div
+    [ HP.class_ (H.ClassName "history-row") ]
+    ( Array.replicate row.startColumn (HH.div [ HP.class_ (H.ClassName "progress-spacer") ] [])
+      <> map (\(Tuple i p) -> renderProgressCell viewedStep i p) row.cells
+    )
+
+renderProgressCell :: Maybe Int -> Int -> WP.Progress -> H.ComponentHTML Action Slots Aff
+renderProgressCell viewedStep i p =
+  let percent    = if p.totalCells > 0 then Int.toNumber p.solvedTotal / Int.toNumber p.totalCells else 0.0
+      lightness  = 15 + Int.floor (percent * 45.0)
+      -- A full restart (`restarted`) is always triggered by a contradiction,
+      -- even when the worker reports it as an ordinary "progress" step (so
+      -- `status`/`running` keep tracking the run that continues past it) —
+      -- so the cell still needs to read as red, not green, at that step.
+      isContra   = p.kind == "contradiction" || p.restarted
+      isViewed   = viewedStep == Just i
+      bg         = if isContra then "#ff4444" else "hsl(130, 55%, " <> show lightness <> "%)"
       extraClass =
         (if p.restarted then " restarted" else "")
         <> (if isContra then " contradiction" else "")
+        <> (if isViewed then " viewed" else "")
       tip =
         "step " <> show p.step
         <> " — solved +" <> show p.solvedDelta
@@ -516,6 +632,7 @@ renderProgressCell p =
     [ HP.class_ (H.ClassName ("progress-cell" <> extraClass))
     , HP.style ("background:" <> bg <> ";")
     , HP.title tip
+    , HE.onClick \_ -> ViewStep i
     ]
     []
 
@@ -588,7 +705,7 @@ renderMain st =
 
 renderMatrix :: State -> H.ComponentHTML Action Slots Aff
 renderMatrix st =
-  case st.displayGrid of
+  case activeGrid st of
     Nothing   -> HH.text ""
     Just grid ->
       let sample = currentSample st
@@ -694,6 +811,7 @@ handleAction = case _ of
       , totalTime   = 0.0
       , displayGrid = Just (WP.waveToSnapshot cat wave)
       , progressLog = []
+      , viewedStep  = Nothing
       }
     drawCanvas
 
@@ -704,32 +822,54 @@ handleAction = case _ of
         t0 <- H.liftEffect now
         result <- H.liftEffect (step wave)
         t1 <- H.liftEffect now
-        let elapsed = timeDiff t0 t1
+        let elapsed   = timeDiff t0 t1
+            prevTotal = fromMaybe 0 (map _.solvedTotal (Array.last st.progressLog))
+            logEntry snap kind contra =
+              WP.emptyProgress
+                { kind        = kind
+                , step        = st.stepCount + 1
+                , solvedDelta = WP.solvedCount snap - prevTotal
+                , solvedTotal = WP.solvedCount snap
+                , totalCells  = WP.totalCellCount snap
+                , elapsedMs   = elapsed
+                , contraX     = fromMaybe (-1) (map _.x contra)
+                , contraY     = fromMaybe (-1) (map _.y contra)
+                , grid        = snap
+                }
         case result of
-          Left (Propagate.Contradiction (Pos p)) ->
+          Left (Propagate.Contradiction (Pos p)) -> do
+            let snap = WP.markContradiction p.x p.y (WP.waveToSnapshot cat wave)
             H.modify_ \s -> s
               { status      = Contradiction
               , stepCount   = s.stepCount + 1
               , stepTimes   = Array.snoc s.stepTimes elapsed
               , totalTime   = s.totalTime + elapsed
-              , displayGrid = Just (WP.markContradiction p.x p.y (WP.waveToSnapshot cat wave))
+              , displayGrid = Just snap
+              , viewedStep  = Nothing
+              , progressLog = Array.snoc s.progressLog (logEntry snap "contradiction" (Just p))
               }
-          Right Nothing ->
+          Right Nothing -> do
+            let snap = WP.waveToSnapshot cat wave
             H.modify_ \s -> s
               { status      = Done
               , stepCount   = s.stepCount + 1
               , stepTimes   = Array.snoc s.stepTimes elapsed
               , totalTime   = s.totalTime + elapsed
-              , displayGrid = Just (WP.waveToSnapshot cat wave)
+              , displayGrid = Just snap
+              , viewedStep  = Nothing
+              , progressLog = Array.snoc s.progressLog (logEntry snap "done" Nothing)
               }
-          Right (Just wave') ->
+          Right (Just wave') -> do
+            let snap = WP.waveToSnapshot cat wave'
             H.modify_ \s -> s
               { wave        = Just wave'
               , status      = Stepped
               , stepCount   = s.stepCount + 1
               , stepTimes   = Array.snoc s.stepTimes elapsed
               , totalTime   = s.totalTime + elapsed
-              , displayGrid = Just (WP.waveToSnapshot cat wave')
+              , displayGrid = Just snap
+              , viewedStep  = Nothing
+              , progressLog = Array.snoc s.progressLog (logEntry snap "progress" Nothing)
               }
         drawCanvas
       _ -> pure unit
@@ -742,6 +882,8 @@ handleAction = case _ of
       , stepCount   = 0
       , stepTimes   = ([] :: Array Number)
       , totalTime   = 0.0
+      , viewedStep  = Nothing
+      , progressLog = []
       , displayGrid = case Tuple st.catalog st.initWave_ of
           Tuple (Just cat) (Just w) -> Just (WP.waveToSnapshot cat w)
           _                         -> st.displayGrid
@@ -789,4 +931,8 @@ handleAction = case _ of
       , customImage = Nothing
       , uploadError = Nothing
       }
+    drawCanvas
+
+  ViewStep i -> do
+    H.modify_ _ { viewedStep = Just i }
     drawCanvas

@@ -36,11 +36,16 @@ type SearchState a =
   }
 
 -- One unit of backtracking search progress. Mirrors `WFC.Algorithm.step`'s
--- role, but with a third outcome: a bad guess doesn't necessarily end the
--- search (`Continue`), only exhausting every alternative all the way back
--- to the first cell does (`Failed`).
+-- role, but with more outcomes: a bad guess doesn't necessarily end the
+-- search — it either tries another value at the same cell, or backtracks
+-- to the parent's decision (`BackedOut`, distinguished from a forward
+-- `Continue` so a caller can tell "still going" apart from "just returned
+-- to an earlier point in the search" — e.g. to draw a search-tree-shaped
+-- history instead of one flat sequence). Only exhausting every alternative
+-- all the way back to the first cell ends the search (`Failed`).
 data StepResult a
   = Continue (SearchState a)
+  | BackedOut (SearchState a)
   | Solved (Wave a)
   | Failed Contradiction
 
@@ -89,7 +94,7 @@ stepSearch st =
     -- decision, or fail outright if there's no parent left to try
     case NonEmpty.fromList rest of
       Nothing     -> pure (Failed (Contradiction frame.pos))
-      Just parent -> pure (Continue (st { stack = parent }))
+      Just parent -> pure (BackedOut (st { stack = parent }))
   else do
     mChosen <- weightedSample frame.wave frame.untried
     case mChosen of
@@ -98,7 +103,7 @@ stepSearch st =
         -- same as exhausted rather than looping on it forever
         case NonEmpty.fromList rest of
           Nothing     -> pure (Failed (Contradiction frame.pos))
-          Just parent -> pure (Continue (st { stack = parent }))
+          Just parent -> pure (BackedOut (st { stack = parent }))
       Just value -> do
         let frame'           = frame { untried = Set.delete value frame.untried }
             stackWithRetried = NonEmpty.cons' frame' rest
@@ -127,8 +132,9 @@ solveWithBacktracking maxAttempts wave0 = do
   first <- initSearch wave0
   tailRecM go first
   where
-    go (Solved wave) = pure (Done (Right wave))
-    go (Failed err)  = pure (Done (Left err))
+    go (Solved wave)   = pure (Done (Right wave))
+    go (Failed err)    = pure (Done (Left err))
+    go (BackedOut st)  = go (Continue st)
     go (Continue st)
       | st.attempts >= maxAttempts =
           pure (Done (Left (Contradiction (NonEmpty.uncons st.stack).head.pos)))

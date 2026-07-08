@@ -114,12 +114,14 @@
       color: #8b949e;
     }
 
-    /* ---- Progress bar ---- */
-    .progress-bar {
+    /* ---- Step history: one row per cycle (restart or backtrack) ---- */
+    .history-block {
       display: flex;
-      flex-wrap: nowrap;
-      gap: 1px;
+      flex-direction: column;
+      gap: 2px;
       overflow-x: auto;
+      overflow-y: auto;
+      max-height: 240px;
       padding: 4px;
       background: #161b22;
       border: 1px solid #30363d;
@@ -127,12 +129,28 @@
       max-width: 100%;
     }
 
+    .history-row {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 1px;
+    }
+
+    .progress-spacer {
+      flex: 0 0 auto;
+      width: 8px;
+      height: 20px;
+    }
+
     .progress-cell {
       flex: 0 0 auto;
       width: 8px;
       height: 20px;
       border-radius: 1px;
-      cursor: default;
+      cursor: pointer;
+    }
+
+    .progress-cell:hover {
+      transform: scaleY(1.15);
     }
 
     .progress-cell.restarted {
@@ -141,6 +159,10 @@
 
     .progress-cell.contradiction {
       box-shadow: inset 0 0 0 1px #ffffff;
+    }
+
+    .progress-cell.viewed {
+      box-shadow: 0 0 0 2px #58a6ff;
     }
 
     /* ---- Pattern section ---- */
@@ -196,12 +218,37 @@
     }
 
     /* ---- Main view ---- */
+    /* No `flex: 1` here on purpose: growing to fill the row would push
+       `.run-panel` all the way to the far edge of a wide viewport instead
+       of sitting right after the canvas/grid. */
     .main-view {
-      flex: 1;
+      flex: 0 1 auto;
       display: flex;
       flex-direction: column;
       gap: 16px;
       align-items: flex-start;
+    }
+
+    /* ---- Run panel (desktop: right of canvas; mobile: stacked below) ---- */
+    .run-panel {
+      width: 280px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* `.demo` defaults to a row (sidebar / canvas+table / run-panel) for
+       desktop widths; below the breakpoint, stack everything in one column
+       in DOM order instead. */
+    @media (max-width: 860px) {
+      .demo {
+        flex-direction: column;
+      }
+
+      .sidebar, .run-panel {
+        width: 100%;
+      }
     }
 
     canvas {
@@ -228,6 +275,41 @@
 
     .uncollapsed {
       background: #1e2530;
+    }
+
+    /* ---- Source preview: the raw grid/tiles patterns get extracted from ---- */
+    .source-preview {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .source-label {
+      font-size: 11px;
+      color: #8b949e;
+    }
+
+    .source-grid {
+      border-collapse: collapse;
+    }
+
+    .source-grid td {
+      width: 10px;
+      height: 10px;
+      padding: 0;
+    }
+
+    .tile-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .tile-swatch {
+      width: 20px;
+      height: 20px;
+      border-radius: 2px;
+      border: 1px solid #30363d;
     }
 
     .sudoku {

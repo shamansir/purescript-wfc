@@ -7,6 +7,7 @@ import Data.Either (Either(..), isLeft)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe, isJust)
 import Data.Number (log)
+import Data.List.NonEmpty as NonEmpty
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
@@ -26,7 +27,7 @@ import WFC.Entropy (cellEntropy, cellsWithEntropy, minEntropyPos)
 import WFC.Collapse (collapseAt)
 import WFC.Propagate (propagate)
 import WFC.Algorithm (wfc, wfcWithRetry)
-import WFC.Backtrack (solveWithBacktracking)
+import WFC.Backtrack (StepResult(..), solveWithBacktracking, stepSearch)
 import WFC.Render (renderWave, renderWaveWith)
 import WFC.Tiles (TileDef, buildTiledCatalog, buildTiledRules, sidesMatch)
 
@@ -456,6 +457,22 @@ main = runSpecAndExitProcess [consoleReporter] do
   -- Backtracking undoes just the last guess (ban that value, try another at
   -- the same cell) instead of restarting the whole wave like
   -- `WFC.Algorithm.wfcWithRetry` does on contradiction.
+
+    it "stepSearch backtracks (BackedOut) to the parent frame once untried is exhausted" do
+      -- Deterministic, rather than relying on a puzzle hard enough to
+      -- actually need a full pop by chance (most real catalogs resolve
+      -- local dead-ends via same-cell retries alone — see the maze
+      -- diagnostic above, 0 pops across many solves): construct a 2-frame
+      -- stack directly, with the top frame's `untried` already empty.
+      let childFrame  = { wave: checker2x2Wave, pos: pos 1 0, untried: (Set.empty :: Set.Set PatternId) }
+          parentFrame = { wave: checker2x2Wave, pos: pos 0 0, untried: Set.singleton p0 }
+          st = { stack: NonEmpty.cons childFrame (NonEmpty.singleton parentFrame), attempts: 0 }
+      result <- liftEffect (stepSearch st)
+      case result of
+        BackedOut st' -> NonEmpty.length st'.stack `shouldEqual` 1
+        Continue _    -> fail "expected BackedOut, not a forward Continue"
+        Solved _      -> fail "expected BackedOut, not Solved"
+        Failed _      -> fail "expected BackedOut, not Failed"
 
     it "solves a trivial 2×2 checkerboard, same as plain wfc" do
       result <- liftEffect $ solveWithBacktracking 100 checker2x2Wave

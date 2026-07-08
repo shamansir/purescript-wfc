@@ -67,16 +67,18 @@ type Command =
 
 -- worker -> main
 type Progress =
-  { kind        :: String -- "progress" | "done" | "contradiction" | "stopped"
-  , step        :: Int
-  , solvedDelta :: Int
-  , solvedTotal :: Int
-  , totalCells  :: Int
-  , elapsedMs   :: Number
-  , restarted   :: Boolean
-  , contraX     :: Int -- -1 if none
-  , contraY     :: Int -- -1 if none
-  , grid        :: Grid
+  { kind           :: String -- "progress" | "done" | "contradiction" | "stopped"
+  , step           :: Int
+  , solvedDelta    :: Int
+  , solvedTotal    :: Int
+  , totalCells     :: Int
+  , elapsedMs      :: Number
+  , restarted      :: Boolean -- full restart from scratch: a new history row starting at column 0
+  , rowBreak       :: Boolean -- this step starts a new history row (restart, or a backtracking pop)
+  , rowStartColumn :: Int     -- column that new row starts at when rowBreak; meaningless otherwise
+  , contraX        :: Int -- -1 if none
+  , contraY        :: Int -- -1 if none
+  , grid           :: Grid
   }
 
 emptyProgress :: Progress
@@ -88,6 +90,8 @@ emptyProgress =
   , totalCells: 0
   , elapsedMs: 0.0
   , restarted: false
+  , rowBreak: false
+  , rowStartColumn: 0
   , contraX: -1
   , contraY: -1
   , grid: []
