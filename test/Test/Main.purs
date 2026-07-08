@@ -28,6 +28,7 @@ import WFC.Propagate (propagate)
 import WFC.Algorithm (wfc, wfcWithRetry)
 import WFC.Backtrack (solveWithBacktracking)
 import WFC.Render (renderWave, renderWaveWith)
+import WFC.Tiles (TileDef, buildTiledCatalog, buildTiledRules, sidesMatch)
 
 -- ---------------------------------------------------------------------------
 -- Test fixtures
@@ -83,6 +84,31 @@ p1 = PatternId 1
 
 pos :: Int -> Int -> Pos
 pos x y = Pos { x, y }
+
+-- A small hand-authored road/pipe-style tile set for WFC.Tiles: blank plus
+-- one tile per connection shape, using "0"/"1" socket labels (0 = no
+-- connection, 1 = connection) — the classic 2-label Wang-tile mechanism.
+tileBlank :: TileDef Int
+tileBlank = { value: 0, weight: 6.0, sockets: { left: "0", right: "0", up: "0", down: "0" } }
+
+tileHoriz :: TileDef Int
+tileHoriz = { value: 1, weight: 2.0, sockets: { left: "1", right: "1", up: "0", down: "0" } }
+
+tileVert :: TileDef Int
+tileVert = { value: 2, weight: 2.0, sockets: { left: "0", right: "0", up: "1", down: "1" } }
+
+-- Connects to the right and downward (an "L" turn).
+tileCorner :: TileDef Int
+tileCorner = { value: 3, weight: 1.0, sockets: { left: "0", right: "1", up: "0", down: "1" } }
+
+tileSet :: Array (TileDef Int)
+tileSet = [ tileBlank, tileHoriz, tileVert, tileCorner ]
+
+tileCatalog :: PatternCatalog Int
+tileCatalog = buildTiledCatalog tileSet
+
+tileRules :: AdjacencyRules
+tileRules = buildTiledRules tileSet
 
 -- ---------------------------------------------------------------------------
 -- Tests
@@ -490,6 +516,64 @@ main = runSpecAndExitProcess [consoleReporter] do
                 case Tuple (cellPidAt w' x y) (cellPidAt w' nx ny) of
                   Tuple (Just pidA) (Just pidB) ->
                     if agrees 3 dir (patternOf pidA) (patternOf pidB)
+                      then []
+                      else [ Tuple (Tuple x y) (Tuple nx ny) ]
+                  _ -> []
+          violations `shouldEqual` []
+
+  -- =========================================================================
+  describe "Stage 10 · WFC.Tiles — hand-authored tiles, socket adjacency" do
+  -- =========================================================================
+  -- Same solving engine as the overlapping model — WFC.Tiles only builds a
+  -- PatternCatalog/AdjacencyRules pair a different way (sockets, not pixel
+  -- overlap), everything downstream is identical.
+
+    it "one PatternId per tile, size 1 (a tile is a single value, not an NxN block)" do
+      Map.size tileCatalog.patterns `shouldEqual` 4
+      tileCatalog.size `shouldEqual` 1
+
+    it "weights come directly from the tile def, not an occurrence count" do
+      tileCatalog.totalW `shouldEqual` 11.0 -- 6 + 2 + 2 + 1
+      Map.lookup (PatternId 0) tileCatalog.weights `shouldEqual` Just 6.0
+      Map.lookup (PatternId 3) tileCatalog.weights `shouldEqual` Just 1.0
+
+    it "blank (right=0) can neighbor any tile whose left socket is 0, not horiz (left=1)" do
+      let neighbors = Array.sort $ lookupNeighbors tileRules DirR (PatternId 0)
+      neighbors `shouldEqual` [ PatternId 0, PatternId 2, PatternId 3 ]
+
+    it "horiz (right=1) can only neighbor tiles whose left socket is 1" do
+      let neighbors = Array.sort $ lookupNeighbors tileRules DirR (PatternId 1)
+      neighbors `shouldEqual` [ PatternId 1 ]
+
+    it "adjacency is mutually consistent: corner right-of blank ↔ blank left-of corner" do
+      let cornerInBlankRight = Array.elem (PatternId 3) (lookupNeighbors tileRules DirR (PatternId 0))
+          blankInCornerLeft  = Array.elem (PatternId 0) (lookupNeighbors tileRules DirL (PatternId 3))
+      cornerInBlankRight `shouldEqual` blankInCornerLeft
+
+    it "solves a periodic tiled wave into a socket-consistent result" do
+      let wave = initWave tileCatalog tileRules { width: 10, height: 10 } true
+
+          cellPidAt w x y = do
+            s <- getCellPossibilities w (Pos { x, y })
+            if Set.size s == 1
+              then Array.head (Set.toUnfoldable s :: Array PatternId)
+              else Nothing
+          tileOf (PatternId i) = fromMaybe tileBlank (Array.index tileSet i)
+
+      result <- liftEffect $ solveWithBacktracking 2000 wave
+      case result of
+        Left  _  -> fail "backtracking failed to solve a small tiled wave"
+        Right w' -> do
+          isFullyCollapsed w' `shouldEqual` true
+          let violations = do
+                y <- Array.range 0 9
+                x <- Array.range 0 9
+                Tuple dir (Tuple ox oy) <- [ Tuple DirR (Tuple 1 0), Tuple DirD (Tuple 0 1) ]
+                let nx = (x + ox) `mod` 10
+                    ny = (y + oy) `mod` 10
+                case Tuple (cellPidAt w' x y) (cellPidAt w' nx ny) of
+                  Tuple (Just pidA) (Just pidB) ->
+                    if sidesMatch dir (tileOf pidA) (tileOf pidB)
                       then []
                       else [ Tuple (Tuple x y) (Tuple nx ny) ]
                   _ -> []

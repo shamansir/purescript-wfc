@@ -24,6 +24,8 @@ import Unsafe.Coerce (unsafeCoerce)
 
 import Demo.ImageUpload as ImageUpload
 import Demo.Samples (SampleDef, samples)
+import Demo.TileSamples (TileSampleDef)
+import Demo.TileSamples as TileSamples
 import Demo.WorkerProtocol (Grid, CellSnapshot)
 import Demo.WorkerProtocol as WP
 import WFC.Algorithm (step)
@@ -32,6 +34,7 @@ import WFC.Grid (Pos(..))
 import WFC.Pattern (Pattern(..), PatternId)
 import WFC.Propagate (Contradiction(..)) as Propagate
 import WFC.Rules (AdjacencyRules, buildRules)
+import WFC.Tiles (buildTiledCatalog, buildTiledRules)
 import WFC.Wave (Wave, initWave)
 import Web.Event.Event as Event
 import Web.File.FileList as FileList
@@ -68,6 +71,7 @@ type State =
   , customImage   :: Maybe WP.CustomImage
   , uploadError   :: Maybe String
   , useBacktracking :: Boolean
+  , tiledMode       :: Boolean
   }
 
 data Action
@@ -84,6 +88,7 @@ data Action
   | WorkerMsg MessageEvent
   | TogglePatterns
   | ToggleBacktracking
+  | ToggleTiledMode
 
 type Slots :: forall k. Row k
 type Slots = ()
@@ -112,6 +117,7 @@ initialState =
   , customImage:   Nothing
   , uploadError:   Nothing
   , useBacktracking: false
+  , tiledMode:       false
   }
 
 -- ---------------------------------------------------------------------------
@@ -128,10 +134,38 @@ fmtMs :: Number -> String
 fmtMs ms =
   show (Int.toNumber (Int.floor (ms * 10.0)) / 10.0) <> "ms"
 
-currentSample :: State -> SampleDef
-currentSample st = case st.customImage of
+-- Shared metadata every renderer needs (name/palette/output size/periodic),
+-- regardless of whether the active sample came from the overlapping model
+-- or the tiled model — every canvas/cell/pattern-thumb renderer only ever
+-- needs this, never the model-specific fields (grid/n vs. tiles).
+type SampleMeta =
+  { name     :: String
+  , palette  :: Int -> String
+  , outW     :: Int
+  , outH     :: Int
+  , periodic :: Boolean
+  }
+
+sampleMetaOf :: SampleDef -> SampleMeta
+sampleMetaOf s = { name: s.name, palette: s.palette, outW: s.outW, outH: s.outH, periodic: s.periodic }
+
+tileSampleMetaOf :: TileSampleDef -> SampleMeta
+tileSampleMetaOf s = { name: s.name, palette: s.palette, outW: s.outW, outH: s.outH, periodic: s.periodic }
+
+-- Resolves the active *overlapping-model* sample (built-in or uploaded);
+-- meaningless while `tiledMode` is on (image upload only applies there).
+currentSampleDef :: State -> SampleDef
+currentSampleDef st = case st.customImage of
   Just ci -> WP.customSampleDef ci
   Nothing -> fromMaybe (unsafeHead samples) (Array.index samples st.sampleIdx)
+
+currentTileSample :: State -> TileSampleDef
+currentTileSample st = fromMaybe (unsafeHead TileSamples.samples) (Array.index TileSamples.samples st.sampleIdx)
+
+currentSample :: State -> SampleMeta
+currentSample st
+  | st.tiledMode = tileSampleMetaOf (currentTileSample st)
+  | otherwise    = sampleMetaOf (currentSampleDef st)
 
 unsafeHead :: forall a. Array a -> a
 unsafeHead arr = case Array.head arr of
@@ -139,12 +173,21 @@ unsafeHead arr = case Array.head arr of
   Nothing -> unsafeHead arr  -- should never happen for non-empty arrays
 
 stopCommand :: WP.Command
-stopCommand = { kind: "stop", sampleIdx: 0, mode: "", custom: WP.emptyCustomImage, useBacktracking: false }
+stopCommand =
+  { kind: "stop", sampleIdx: 0, mode: "", custom: WP.emptyCustomImage
+  , useBacktracking: false, tiledMode: false
+  }
 
 runCommand :: State -> String -> WP.Command
 runCommand st mode = case st.customImage of
-  Just ci -> { kind: "run", sampleIdx: -1, mode, custom: ci, useBacktracking: st.useBacktracking }
-  Nothing -> { kind: "run", sampleIdx: st.sampleIdx, mode, custom: WP.emptyCustomImage, useBacktracking: st.useBacktracking }
+  Just ci | not st.tiledMode ->
+    { kind: "run", sampleIdx: -1, mode, custom: ci
+    , useBacktracking: st.useBacktracking, tiledMode: false
+    }
+  _ ->
+    { kind: "run", sampleIdx: st.sampleIdx, mode, custom: WP.emptyCustomImage
+    , useBacktracking: st.useBacktracking, tiledMode: st.tiledMode
+    }
 
 -- Fields shared by "switch to a different sample" (built-in or uploaded):
 -- drop whatever local wave/run/progress state referred to the old sample.
@@ -213,7 +256,7 @@ drawCanvasEffect st = do
             Canvas.setFont ctx (show (Int.floor (min cellW cellH * 0.7)) <> "px sans-serif")
             Canvas.setTextAlign ctx Canvas.AlignCenter
             for_ cells \(Tuple (Tuple x y) cell) -> do
-              let color = WP.cellColor sampleDef cell
+              let color = WP.cellColor sampleDef.palette cell
                   px    = Int.toNumber x * cellW
                   py    = Int.toNumber y * cellH
               Canvas.setFillStyle ctx color
@@ -292,16 +335,41 @@ render st =
 
 renderSidebar :: State -> H.ComponentHTML Action Slots Aff
 renderSidebar st =
+  let sampleNames =
+        if st.tiledMode
+          then map _.name TileSamples.samples
+          else map _.name samples
+  in
   HH.div
     [ HP.class_ (H.ClassName "sidebar") ]
     [ HH.select
         [ HE.onSelectedIndexChange SelectSample ]
-        (Array.mapWithIndex renderOption samples)
-    , renderUpload st
+        (Array.mapWithIndex renderOption sampleNames)
+    , renderModeToggle st
+    , if st.tiledMode then HH.text "" else renderUpload st
     , renderButtons st
     , renderStats st
     , renderProgress st
     , renderPatterns st
+    ]
+
+-- Switches the sample source between the overlapping model (image-derived
+-- patterns) and the tiled model (hand-authored tiles + socket adjacency,
+-- WFC.Tiles) — both build the same PatternCatalog/AdjacencyRules pair the
+-- solving engine consumes, this only changes which one supplies them.
+-- Image upload only applies to the overlapping model, so its UI is hidden
+-- while tiled mode is active.
+renderModeToggle :: State -> H.ComponentHTML Action Slots Aff
+renderModeToggle st =
+  HH.label
+    [ HP.class_ (H.ClassName "toggle-row") ]
+    [ HH.input
+        [ HP.type_ HP.InputCheckbox
+        , HP.checked st.tiledMode
+        , HP.disabled st.running
+        , HE.onChecked \_ -> ToggleTiledMode
+        ]
+    , HH.text " Tiled mode (hand-authored tiles)"
     ]
 
 -- File upload: pick a small (<=32x32) image to use as the pattern source
@@ -331,11 +399,11 @@ renderUpload st =
         Nothing  -> HH.text ""
     ]
 
-renderOption :: Int -> SampleDef -> H.ComponentHTML Action Slots Aff
-renderOption i s =
+renderOption :: Int -> String -> H.ComponentHTML Action Slots Aff
+renderOption i name =
   HH.option
     [ HP.value (show i) ]
-    [ HH.text s.name ]
+    [ HH.text name ]
 
 renderButtons :: State -> H.ComponentHTML Action Slots Aff
 renderButtons st =
@@ -378,7 +446,7 @@ renderButtons st =
         ]
         [ HH.text "■ Stop" ]
     , HH.label
-        [ HP.class_ (H.ClassName "backtracking-toggle") ]
+        [ HP.class_ (H.ClassName "toggle-row") ]
         [ HH.input
             [ HP.type_ HP.InputCheckbox
             , HP.checked st.useBacktracking
@@ -531,14 +599,14 @@ renderMatrix st =
           HH.tr_ (map (renderCell sample) row)
         ) grid)
 
-renderCell :: SampleDef -> CellSnapshot -> H.ComponentHTML Action Slots Aff
+renderCell :: SampleMeta -> CellSnapshot -> H.ComponentHTML Action Slots Aff
 renderCell sample cell
   | cell.contradiction =
       HH.td
         [ HP.style "background:#ff4444;color:white;text-align:center;" ]
         [ HH.text "?" ]
   | cell.collapsed =
-      let bg   = WP.cellColor sample cell
+      let bg   = WP.cellColor sample.palette cell
           text = fromMaybe "" (map show (Array.head cell.values))
       in
       HH.td
@@ -603,10 +671,18 @@ handleAction = case _ of
 
   ExtractPatterns -> do
     st <- H.get
-    let sample = currentSample st
-        cat    = extractPatterns sample.n sample.periodic 1 sample.grid
-        rules  = buildRules cat
-        wave   = initWave cat rules { width: sample.outW, height: sample.outH } sample.periodic
+    let Tuple cat rules =
+          if st.tiledMode
+            then
+              let ts = currentTileSample st
+                  c  = buildTiledCatalog ts.tiles
+              in Tuple c (buildTiledRules ts.tiles)
+            else
+              let sample = currentSampleDef st
+                  c      = extractPatterns sample.n sample.periodic 1 sample.grid
+              in Tuple c (buildRules c)
+        meta = currentSample st
+        wave = initWave cat rules { width: meta.outW, height: meta.outH } meta.periodic
     H.modify_ \s -> s
       { status      = Ready
       , catalog     = Just cat
@@ -703,3 +779,14 @@ handleAction = case _ of
 
   ToggleBacktracking ->
     H.modify_ \st -> st { useBacktracking = not st.useBacktracking }
+
+  ToggleTiledMode -> do
+    st <- H.get
+    for_ st.worker (H.liftEffect <<< Worker.postMessage stopCommand)
+    H.modify_ \s -> (resetRunState s)
+      { tiledMode   = not s.tiledMode
+      , sampleIdx   = 0
+      , customImage = Nothing
+      , uploadError = Nothing
+      }
+    drawCanvas

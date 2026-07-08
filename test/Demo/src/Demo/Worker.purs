@@ -9,6 +9,8 @@ import Data.List.NonEmpty as NonEmpty
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Time.Duration (Milliseconds(..))
 import Demo.Samples (checkerboard, samples)
+import Demo.TileSamples (roads)
+import Demo.TileSamples as TileSamples
 import Demo.WorkerProtocol (Command, customSampleDef, emptyProgress, markContradiction, solvedCount, totalCellCount, waveToSnapshot)
 import Effect (Effect)
 import Effect.Aff (Aff, delay, launchAff_)
@@ -20,10 +22,11 @@ import Unsafe.Coerce (unsafeCoerce)
 import WFC.Algorithm (step)
 import WFC.Backtrack (StepResult(..))
 import WFC.Backtrack as Backtrack
-import WFC.Catalog (extractPatterns)
+import WFC.Catalog (PatternCatalog, extractPatterns)
 import WFC.Grid (Pos(..))
 import WFC.Propagate (Contradiction(..))
-import WFC.Rules (buildRules)
+import WFC.Rules (AdjacencyRules, buildRules)
+import WFC.Tiles (buildTiledCatalog, buildTiledRules)
 import WFC.Wave (Wave, initWave)
 import Demo.WorkerScope as Scope
 import Web.Worker.MessageEvent (MessageEvent)
@@ -50,12 +53,20 @@ handleMessage tokenRef ev = do
     "stop" -> void (Ref.modify (_ + 1) tokenRef)
     "run"  -> do
       myToken <- Ref.modify (_ + 1) tokenRef
-      let sample = if cmd.sampleIdx == -1
-                     then customSampleDef cmd.custom
-                     else fromMaybe checkerboard (Array.index samples cmd.sampleIdx)
-          cat    = extractPatterns sample.n sample.periodic 1 sample.grid
-          rules  = buildRules cat
-          wave0  = initWave cat rules { width: sample.outW, height: sample.outH } sample.periodic
+      let built :: { cat :: PatternCatalog Int, rules :: AdjacencyRules, outW :: Int, outH :: Int, periodic :: Boolean }
+          built =
+            if cmd.tiledMode then
+              let ts = fromMaybe roads (Array.index TileSamples.samples cmd.sampleIdx)
+              in { cat: buildTiledCatalog ts.tiles, rules: buildTiledRules ts.tiles
+                 , outW: ts.outW, outH: ts.outH, periodic: ts.periodic
+                 }
+            else
+              let sample = if cmd.sampleIdx == -1
+                             then customSampleDef cmd.custom
+                             else fromMaybe checkerboard (Array.index samples cmd.sampleIdx)
+                  cat    = extractPatterns sample.n sample.periodic 1 sample.grid
+              in { cat, rules: buildRules cat, outW: sample.outW, outH: sample.outH, periodic: sample.periodic }
+          wave0 = initWave built.cat built.rules { width: built.outW, height: built.outH } built.periodic
       t0 <- now
       if cmd.useBacktracking
         then do

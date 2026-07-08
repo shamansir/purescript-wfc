@@ -60,8 +60,9 @@ type Command =
   { kind            :: String -- "run" | "stop"
   , sampleIdx       :: Int     -- ignored for "stop"; -1 means "use `custom` below"
   , mode            :: String -- "once" | "untilSolved"
-  , custom          :: CustomImage -- ignored unless sampleIdx == -1
+  , custom          :: CustomImage -- ignored unless sampleIdx == -1 and not tiledMode
   , useBacktracking :: Boolean -- undo just the last guess instead of a full restart
+  , tiledMode       :: Boolean -- hand-authored tiles (WFC.Tiles) instead of the overlapping model
   }
 
 -- worker -> main
@@ -124,15 +125,18 @@ solvedCount = foldl (\acc row -> acc + foldl (\a c -> if c.collapsed then a + 1 
 totalCellCount :: Grid -> Int
 totalCellCount = foldl (\acc row -> acc + Array.length row) 0
 
--- Map a cell snapshot to a fill color using the sample's palette.
-cellColor :: SampleDef -> CellSnapshot -> String
+-- Map a cell snapshot to a fill color using a palette function — just the
+-- palette, not a whole sample record, so this works the same whether the
+-- active sample came from the overlapping model or the tiled model (or
+-- anything else with a palette).
+cellColor :: (Int -> String) -> CellSnapshot -> String
 cellColor _ snap | snap.contradiction = "#ff4444"
-cellColor sample snap
+cellColor palette snap
   | snap.collapsed = case Array.head snap.values of
-      Just v  -> sample.palette v
+      Just v  -> palette v
       Nothing -> "#888888"
   | Array.length snap.values == 0 = "#ff4444"
   | otherwise = "#c0c0d0"
 
-snapshotToPalette :: SampleDef -> Grid -> Array (Array String)
-snapshotToPalette sample = map (map (cellColor sample))
+snapshotToPalette :: (Int -> String) -> Grid -> Array (Array String)
+snapshotToPalette palette = map (map (cellColor palette))

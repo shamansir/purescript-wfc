@@ -23,12 +23,14 @@ work from.
 | Main loop | `WFC.Algorithm.step` / `wfc` / `wfcWithRetry` |
 | Incremental backtracking | `WFC.Backtrack.solveWithBacktracking` |
 | Overlapping-model extraction | `WFC.Catalog.extractPatterns` |
-| Automatic rule derivation | `WFC.Rules.buildRules` / `WFC.Pattern.agrees` |
+| Automatic rule derivation (overlapping) | `WFC.Rules.buildRules` / `WFC.Pattern.agrees` |
+| Tiled-model construction | `WFC.Tiles.buildTiledCatalog` / `buildTiledRules` |
 | Reconstructing the output | `WFC.Render.renderWave` |
 
-Only the **overlapping model** is implemented — there is no hand-authored
-tiled/Wang-tile mode; every `SampleDef` supplies a source grid, not a
-tileset+socket table (see [Differences](#differences-from-the-wfcmd-description) below).
+Both the **overlapping model** and the **tiled model** are implemented (see
+[Tiled model](#tiled-model-wfctiles) below) — `Demo.Samples.SampleDef`
+(image-derived) and `Demo.TileSamples.TileSampleDef` (hand-authored tiles)
+are two parallel sample sources, toggled in the demo.
 
 ## Walking the main loop
 
@@ -257,6 +259,65 @@ topLeftPixel catalog pid = do
   Array.head px
 ```
 
+## Tiled model (`WFC.Tiles`)
+
+Added 2026-07-08, alongside the overlapping model, not replacing it — the
+second of `WFC.md`'s two documented ways to supply values + adjacency
+rules (hand-authored tiles with declared adjacency, vs. mining an example
+image). The key realization while implementing it: **every solving module
+— `WFC.Wave`, `WFC.Entropy`, `WFC.Collapse`, `WFC.Propagate`,
+`WFC.Algorithm`, `WFC.Backtrack`, `WFC.Render` — only ever consumes a
+`PatternCatalog a` + `AdjacencyRules`; none of them know or care how those
+were built.** So the tiled model needed *zero* engine changes — it's purely
+a second constructor for the same two values `extractPatterns`/`buildRules`
+already produce. A "tile" is just a `Pattern a` of size 1 (one value, not
+an N×N block) — `topLeftPixel`'s `Array.head px` above already handles a
+1-element pattern with no special-casing.
+
+Adjacency uses **socket labels** per side (the classic Wang-tile
+mechanism, one of the concrete examples `WFC.md` itself walks through)
+rather than a hand-written pairwise compatibility list:
+
+```purescript
+-- WFC.Tiles
+type Sockets = { left :: String, right :: String, up :: String, down :: String }
+type TileDef a = { value :: a, weight :: Number, sockets :: Sockets }
+
+sidesMatch DirR a b = a.sockets.right == b.sockets.left
+sidesMatch DirL a b = a.sockets.left  == b.sockets.right
+-- (DirD/DirU mirrored)
+```
+
+This is inherently symmetric — tile A's right label matching tile B's left
+label *is* the same fact as "B is a valid left-neighbour of A," no separate
+reciprocal bookkeeping needed, unlike a directed pairwise list (which is
+exactly why the overlapping model's `agrees` needed the symmetry argument
+worked through carefully during earlier debugging, and this doesn't).
+`buildTiledCatalog` reuses `WFC.Catalog.finalize` directly for the
+weight/entropy bookkeeping (weights come straight from each `TileDef`,
+not an occurrence count like `extractPatterns`'s `accumulatePattern` —
+`cellEntropy`/`weightedSample` don't care which); `buildTiledRules`
+produces a plain `WFC.Rules.AdjacencyRules` value, same type the
+overlapping model's `buildRules` produces.
+
+Rotation/symmetry variants (`WFC.md` notes the "simple tiled model"
+accounts for these) are **not** auto-generated the way
+`WFC.Pattern.symmetryVariants` does for the overlapping model — a sample
+author just lists rotated tiles as separate `TileDef`s with rotated socket
+labels (there's no tile *graphic* here for the engine to rotate itself,
+only a flat value + labels). Kept deliberately small.
+
+Demo side: `Demo.TileSamples.TileSampleDef` (tiles/palette/output
+size/periodic) is the tiled-model counterpart of `Demo.Samples.SampleDef`,
+with one built-in set (`roads`: blank + straight ×2 + all four corners, 2
+socket labels). Verified in `test/Test/Main.purs` "Stage 10" (catalog/rule
+correctness, plus the same pairwise-consistency check used for the
+overlapping model, this time via `sidesMatch` instead of `agrees`) and
+live in the demo via a "Tiled mode" checkbox that switches the sample
+dropdown, `Extract`, and the worker's catalog construction between the two
+models — screenshotted output shows a genuine connected road network, not
+just "no contradiction."
+
 ## Where the demo's loop differs
 
 `test/Demo/src/Demo/Worker.purs`'s `runLoop` does not call `wfc`/
@@ -282,13 +343,12 @@ ones. `Demo.WorkerProtocol.Command` carries the choice as
 Noted while doing this comparison; not fixed yet. Ordered roughly by
 how much they'd affect correctness/capability if left alone.
 
-1. **Only the overlapping model exists.** `WFC.md` documents the tiled
+1. ~~**Only the overlapping model exists.**~~ `WFC.md` documents the tiled
    model (hand-authored tileset + per-edge adjacency/"sockets") as an
    equally-valid, simpler-to-reason-about way to supply values and rules.
-   This repo has no representation for a hand-authored tileset at all —
-   every sample is a source grid run through `extractPatterns`. Not a bug,
-   but a real capability gap if a future sample ever wants exact,
-   hand-specified adjacency rather than ones mined from an example image.
+   **Fixed 2026-07-08** — see [Tiled model](#tiled-model-wfctiles) above
+   (`WFC.Tiles.buildTiledCatalog`/`buildTiledRules`), added alongside the
+   overlapping model, toggleable in the demo.
 
 2. ~~**`periodic` conflates two independent choices.**~~ `WFC.md`'s
    overlapping-model section treats "does the *source* wrap when patterns
@@ -336,12 +396,10 @@ Live to-do list distilled from the differences above. Trim an item once
 it's actually done (or decided against, like #2/#7 above); don't leave
 resolved items in this section.
 
-1. **Tiled-model support (#1)** — a hand-authored tileset + per-edge
-   adjacency ("sockets") mode, as an alternative to always mining patterns
-   from a source image via `extractPatterns`. Larger, separable feature;
-   no timeline.
-2. **Grid/adjacency extensions (#5)** — non-Euclidean/hex/3D grids,
+1. **Grid/adjacency extensions (#5)** — non-Euclidean/hex/3D grids,
    multi-cell modules, weighted (not just allow/disallow) adjacency. Larger,
    separable feature; no timeline.
 
-(#3/#4 — incremental backtracking — done 2026-07-08, see `WFC.Backtrack`.)
+(#1 — tiled model — and #3/#4 — incremental backtracking — done
+2026-07-08, see `WFC.Tiles` and `WFC.Backtrack` above. This is the only
+item left.)
