@@ -14,7 +14,7 @@ import Effect.Random (random)
 import WFC.Grid (Pos)
 import WFC.Pattern (PatternId)
 import WFC.Propagate (BanEvent, Contradiction(..), propagate)
-import WFC.Wave (Wave, setCell)
+import WFC.Wave (Wave)
 
 -- Weighted random pick from (pid, weight) pairs.
 -- threshold should be in [0, totalWeight).
@@ -52,7 +52,11 @@ collapseAt wave pos =
       case mChosen of
         Nothing     -> pure (Left (Contradiction pos))
         Just chosen ->
-          let wave'   = setCell pos (Just (Set.singleton chosen)) wave
-              toBan   = Array.filter (_ /= chosen) (Set.toUnfoldable s :: Array PatternId)
+          -- let wave'   = setCell pos (Just (Set.singleton chosen)) wave
+          --     toBan   = Array.filter (_ /= chosen) (Set.toUnfoldable s :: Array PatternId)
+          --     banEvts = map (Tuple pos) toBan :: Array BanEvent
+          -- in pure (propagate wave' banEvts)
+          let toBan   = Array.filter (_ /= chosen) (Set.toUnfoldable s :: Array PatternId)
               banEvts = map (Tuple pos) toBan :: Array BanEvent
-          in pure (propagate wave' banEvts)
+          in pure (propagate wave banEvts)
+

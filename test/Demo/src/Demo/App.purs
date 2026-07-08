@@ -134,6 +134,19 @@ runAllEffect w0 = go w0 0
         Right Nothing    -> pure { wave: Just w, steps: n }
         Right (Just w')  -> go w' (n + 1)
 
+-- Run all steps, restarting from the pristine initial wave on contradiction.
+-- A contradiction is a normal, expected outcome of the random collapse order
+-- (not a bug) — retrying from scratch a few times is the standard WFC fix.
+runAllWithRetryEffect :: Int -> Wave Int -> Effect { wave :: Maybe (Wave Int), steps :: Int }
+runAllWithRetryEffect maxAttempts w0 = go maxAttempts
+  where
+    go 0 = pure { wave: Nothing, steps: 0 }
+    go n = do
+      res <- runAllEffect w0
+      case res.wave of
+        Just _  -> pure res
+        Nothing -> go (n - 1)
+
 -- ---------------------------------------------------------------------------
 -- Canvas drawing
 -- ---------------------------------------------------------------------------
@@ -480,11 +493,11 @@ handleAction = case _ of
 
   RunAll -> do
     st <- H.get
-    case st.wave of
+    case st.initWave_ of
       Nothing   -> pure unit
-      Just wave -> do
+      Just freshWave -> do
         t0 <- H.liftEffect now
-        res <- H.liftEffect (runAllEffect wave)
+        res <- H.liftEffect (runAllWithRetryEffect 30 freshWave)
         t1 <- H.liftEffect now
         let elapsed = timeDiff t0 t1
         case res.wave of
