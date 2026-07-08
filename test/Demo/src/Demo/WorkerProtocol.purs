@@ -213,6 +213,29 @@ cellSnapshot cat (Just pids) =
   , values: Array.mapMaybe (topLeftPixel cat) (Set.toUnfoldable pids :: Array PatternId)
   }
 
+-- The canonical "fully uncollapsed" cell for a catalog — every pattern
+-- still possible, same as any cell of a freshly `initWave`d wave's own
+-- snapshot would be, computed directly instead of needing a whole `Wave`
+-- just for this. Used to fill newly-exposed grid area the instant Result
+-- W/H grows (see `resizeGrid`), without waiting on (or restarting) a solve.
+blankCellSnapshot :: PatternCatalog Int -> CellSnapshot
+blankCellSnapshot cat =
+  cellSnapshot cat (Just (Set.fromFoldable (map (\(Tuple pid _) -> pid) (Map.toUnfoldable cat.patterns :: Array (Tuple PatternId (Pattern Int))))))
+
+-- Crop rows/columns beyond `newW`/`newH`, or pad the right/bottom edge with
+-- `blank` — never touching a cell within the old bounds. Top-left anchored,
+-- mirroring `WFC.Wave.resizeWave`'s same crop/extend semantics on the
+-- engine side, so a displayed grid resized this way and a session's own
+-- wave resized that way always agree pixel-for-pixel.
+resizeGrid :: CellSnapshot -> Int -> Int -> Grid -> Grid
+resizeGrid blank newW newH grid =
+  let
+    padRow row = Array.take newW row <> Array.replicate (max 0 (newW - Array.length row)) blank
+    rows       = map padRow (Array.take newH grid)
+    blankRow   = Array.replicate newW blank
+  in
+    rows <> Array.replicate (max 0 (newH - Array.length rows)) blankRow
+
 -- Render a wave into the plain snapshot grid sent over postMessage.
 waveToSnapshot :: PatternCatalog Int -> Wave Int -> Grid
 waveToSnapshot cat wave =

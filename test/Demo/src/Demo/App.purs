@@ -89,6 +89,8 @@ type State =
   , tilesetPalette  :: Maybe (Int -> String) -- built alongside `catalog` at Extract time, for SrcXmlTileset only
   , tilesetTileOf   :: Maybe (Int -> Maybe WP.TileRef) -- ditto — which tile+orientation a pattern's Int stands for
   , tilesetImageCache :: Map String Canvas.CanvasImageSource -- preloaded per-tile PNGs, keyed by src URL
+  , blankCellSnapshot :: Maybe WP.CellSnapshot -- the fully-uncollapsed cell for the active catalog; built alongside it at Extract time, used to fill new area on a live resize
+  , fixOutputSize     :: Boolean -- when true, switching samples keeps Result W/H instead of resetting to the new sample's own defaults
   }
 
 -- Which of the demo's 4 sample sources is currently selected, derived
@@ -129,6 +131,7 @@ data Action
   | SetPatternSize Int
   | SetOutW Int
   | SetOutH Int
+  | ToggleFixOutputSize
   | ToggleRotations
   | ToggleMirror
   | ToggleInputPeriodic
@@ -175,6 +178,8 @@ initialState =
   , tilesetPalette:  Nothing
   , tilesetTileOf:   Nothing
   , tilesetImageCache: Map.empty
+  , blankCellSnapshot: Nothing
+  , fixOutputSize:     false
   }
 
 -- ---------------------------------------------------------------------------
@@ -347,6 +352,11 @@ runCommand st mode = buildCommand st "run" mode
 stepCommand :: State -> WP.Command
 stepCommand st = buildCommand st "step" ""
 
+-- Only `outW`/`outH` actually matter to the worker's "resize" handler; the
+-- rest of `buildCommand`'s fields ride along unused, same as `stepCommand`.
+resizeCommand :: State -> WP.Command
+resizeCommand st = buildCommand st "resize" ""
+
 -- Fields shared by "switch to a different sample" (built-in or uploaded):
 -- drop whatever local wave/run/progress state referred to the old sample.
 resetRunState :: State -> State
@@ -366,6 +376,7 @@ resetRunState s = s
   , stepBackedOut = false
   , tilesetPalette = Nothing
   , tilesetTileOf = Nothing
+  , blankCellSnapshot = Nothing
   }
 
 -- Reasonable defaults for a freshly-decoded upload: N=3 when the image is at
@@ -541,6 +552,27 @@ drawCanvas = do
   st <- H.get
   H.liftEffect $ drawCanvasEffect st
 
+-- Applied on every Result W/H change: crops or pads the *currently
+-- displayed* grid to the new size right away (top-left anchored — new area
+-- fills with the fully-uncollapsed cell, same as a freshly-extracted
+-- catalog's own initial wave would show there), then quietly tells the
+-- worker to resize its own live session's wave(s) to match, so the next
+-- Step/Run continues from the new size instead of overwriting this back to
+-- the old one. A no-op before the first Extract (`blankCellSnapshot`
+-- isn't built yet, and there's nothing running to resize either).
+resizeLive :: H.HalogenM State Action Slots Void Aff Unit
+resizeLive = do
+  st <- H.get
+  case st.blankCellSnapshot of
+    Nothing -> pure unit
+    Just blank -> do
+      H.modify_ \s -> s
+        { displayGrid = WP.resizeGrid blank s.outW s.outH <$> s.displayGrid
+        , viewedStep  = Nothing
+        }
+      drawCanvas
+      sendToWorkerQuiet (resizeCommand st)
+
 -- ---------------------------------------------------------------------------
 -- Worker plumbing
 -- ---------------------------------------------------------------------------
@@ -574,6 +606,16 @@ sendToWorker cmd = do
     H.modify_ _ { cmdSeq = st.cmdSeq + 1 }
     H.liftEffect (Worker.postMessage cmd w)
 
+-- Like `sendToWorker`, but doesn't bump `cmdSeq` and doesn't spawn a worker
+-- if there isn't one yet — for commands that intentionally don't supersede
+-- whatever's in flight (only "resize" today; see `Demo.Worker`'s own
+-- "resize" case, which likewise leaves its `tokenRef` alone) and that don't
+-- need a worker at all when nothing's ever been extracted.
+sendToWorkerQuiet :: WP.Command -> H.HalogenM State Action Slots Void Aff Unit
+sendToWorkerQuiet cmd = do
+  st <- H.get
+  for_ st.worker \w -> H.liftEffect (Worker.postMessage cmd w)
+
 -- Same, but spawns the worker first if this is the very first command sent
 -- to it ("run"/"step" need to reach a worker that may not exist yet;
 -- "stop"/"resetSession" are no-ops when there's nothing to stop/reset, so
@@ -588,8 +630,12 @@ applySampleDefaults :: H.HalogenM State Action Slots Void Aff Unit
 applySampleDefaults = do
   st <- H.get
   let d = sampleDefaults st
-  H.modify_ _
-    { patternSize = d.n, outW = d.outW, outH = d.outH
+  H.modify_ \s -> s
+    { patternSize = d.n
+    -- "Fix" keeps Result W/H exactly as they were across a sample switch,
+    -- instead of snapping to the newly-selected sample's own defaults.
+    , outW = if s.fixOutputSize then s.outW else d.outW
+    , outH = if s.fixOutputSize then s.outH else d.outH
     , inputPeriodic = d.periodic, outputPeriodic = d.periodic
     }
 
@@ -778,6 +824,15 @@ renderSizeControls st =
               , HP.max 64.0
               , HE.onValueChange (\v -> SetOutH (clampInt 1 64 (fromMaybe st.outH (Int.fromString v))))
               ]
+          ]
+      , HH.label
+          [ HP.class_ (H.ClassName "size-label") ]
+          [ HH.input
+              [ HP.type_ HP.InputCheckbox
+              , HP.checked st.fixOutputSize
+              , HE.onChecked \_ -> ToggleFixOutputSize
+              ]
+          , HH.text " Fix"
           ]
       ]
     )
@@ -1297,6 +1352,7 @@ handleAction = case _ of
       , stepBackedOut  = false
       , tilesetPalette = built.palette
       , tilesetTileOf  = built.tileOf
+      , blankCellSnapshot = Just (WP.blankCellSnapshot cat)
       }
     drawCanvas
     -- Preload the tileset's tile images in the background, if this is an
@@ -1399,11 +1455,16 @@ handleAction = case _ of
   SetPatternSize n ->
     H.modify_ _ { patternSize = n }
 
-  SetOutW w ->
+  SetOutW w -> do
     H.modify_ _ { outW = w }
+    resizeLive
 
-  SetOutH h ->
+  SetOutH h -> do
     H.modify_ _ { outH = h }
+    resizeLive
+
+  ToggleFixOutputSize ->
+    H.modify_ \st -> st { fixOutputSize = not st.fixOutputSize }
 
   ToggleRotations ->
     H.modify_ \st -> st { useRotations = not st.useRotations }

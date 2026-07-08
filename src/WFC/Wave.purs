@@ -2,6 +2,7 @@ module WFC.Wave where
 
 import Prelude
 
+import Data.Array as Array
 import Data.Foldable (all)
 import Data.Map (Map)
 import Data.Map as Map
@@ -11,7 +12,7 @@ import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import WFC.Catalog (PatternCatalog)
 import WFC.Direction (Direction, allDirections)
-import WFC.Grid (GridSize, Pos, allPositions)
+import WFC.Grid (GridSize, Pos(..), allPositions)
 import WFC.Pattern (PatternId)
 import WFC.Rules (AdjacencyRules, initialCompatCount)
 
@@ -60,6 +61,36 @@ initWave catalog rules size periodic =
       cells    = Map.fromFoldable $ map (\pos -> Tuple pos initCell) positions
       compat   = Map.fromFoldable $ map (\pos -> Tuple pos cellComp) positions
   in { cells, compat, catalog, rules, size, periodic }
+
+-- Resize a wave to `newSize`, keeping every cell/compat entry whose position
+-- still falls within the new bounds untouched (same possibilities, same
+-- propagation progress) and filling any newly-exposed positions with a
+-- fresh full-superposition cell — the same "crop or extend, never restart"
+-- resize a plain grid would get, just carrying the compat map along so
+-- propagation on the new cells keeps working correctly. Positions dropped
+-- by shrinking (e.g. a decision frame's own cell, in backtracking search)
+-- simply stop existing in `cells`/`compat`; `getCellPossibilities` already
+-- treats a missing position as a contradiction, so callers that still
+-- reference a dropped position fail gracefully through the existing
+-- contradiction-recovery path instead of needing special-case handling here.
+resizeWave :: forall a. GridSize -> Wave a -> Wave a
+resizeWave newSize wave =
+  let
+    ids       = map (\(Tuple pid _) -> pid) (Map.toUnfoldable wave.catalog.patterns :: Array (Tuple PatternId _))
+    initCell  = Just (Set.fromFoldable ids)
+    cellComp  = initialCellCompat wave.rules ids
+    inBounds (Pos { x, y }) = x >= 0 && x < newSize.width && y >= 0 && y < newSize.height
+    keptCells  = Map.filterKeys inBounds wave.cells
+    keptCompat = Map.filterKeys inBounds wave.compat
+    newPos     = Array.filter (\p -> not (Map.member p keptCells)) (allPositions newSize)
+    fillCells  = Map.fromFoldable (map (\pos -> Tuple pos initCell) newPos)
+    fillCompat = Map.fromFoldable (map (\pos -> Tuple pos cellComp) newPos)
+  in
+    wave
+      { cells  = Map.union keptCells fillCells
+      , compat = Map.union keptCompat fillCompat
+      , size   = newSize
+      }
 
 -- Read a cell's possibility set.
 getCellPossibilities :: forall a. Wave a -> Pos -> Maybe (Set PatternId)

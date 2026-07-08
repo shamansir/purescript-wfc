@@ -24,11 +24,11 @@ import WFC.Algorithm (step)
 import WFC.Backtrack (SearchState, StepResult(..))
 import WFC.Backtrack as Backtrack
 import WFC.Catalog (PatternCatalog, extractPatterns)
-import WFC.Grid (Pos(..))
+import WFC.Grid (GridSize, Pos(..))
 import WFC.Propagate (Contradiction(..))
 import WFC.Rules (AdjacencyRules, buildRules)
 import WFC.Tiles (buildTiledCatalog, buildTiledRules)
-import WFC.Wave (Wave, initWave)
+import WFC.Wave (Wave, initWave, resizeWave)
 import Demo.WorkerScope as Scope
 import Web.Worker.MessageEvent (MessageEvent)
 import Web.Worker.MessageEvent as MessageEvent
@@ -81,7 +81,41 @@ handleMessage tokenRef sessionRef ev = do
       -- Force single-shot regardless of what `mode` the caller sent —
       -- `runFrom` only loops when `mode` is "once"/"untilSolved".
       launchAff_ (runFrom sessionRef tokenRef myToken (cmd { mode = "" }))
+    "resize" -> do
+      -- Deliberately doesn't touch `tokenRef` — unlike "stop"/"resetSession"/
+      -- "run"/"step", a resize doesn't supersede or interrupt whatever's in
+      -- flight, it just changes the live session's own grid size in place
+      -- (or does nothing if there's no session yet — the next "run"/"step"
+      -- will lazily build one at the new `cmd.outW`/`cmd.outH` anyway). No
+      -- reply is sent either: the main thread already applied the same
+      -- crop/fill resize to its own displayed grid the instant the size
+      -- input changed, so the two stay in sync without a round trip —
+      -- this message only needs to keep the *engine* state consistent with
+      -- what's already on screen.
+      mSession <- Ref.read sessionRef
+      case mSession of
+        Nothing -> pure unit
+        Just s  -> Ref.write (Just (resizeSession { width: cmd.outW, height: cmd.outH } s)) sessionRef
     _ -> pure unit
+
+-- Resize every wave a live session could currently be reporting from —
+-- `wave0` (so a later restart-on-contradiction lands at the new size too),
+-- `plain`, and every frame's own `wave` in a backtracking search's stack.
+-- A frame's `pos`/`untried` never need adjustment: `untried` is just
+-- catalog-level pattern ids (position-independent), and if a frame's `pos`
+-- happens to fall outside the new bounds after shrinking, `resizeWave`
+-- already dropped that position from `cells` — the next `attemptValue` at
+-- that frame reads it as an ordinary contradiction and backtracks out
+-- through the existing recovery path, no special-casing needed here.
+resizeSession :: GridSize -> Session -> Session
+resizeSession newSize session = session
+  { wave0  = resizeWave newSize session.wave0
+  , plain  = map (resizeWave newSize) session.plain
+  , search = map (resizeSearchState newSize) session.search
+  }
+
+resizeSearchState :: GridSize -> SearchState Int -> SearchState Int
+resizeSearchState newSize st = st { stack = map (\f -> f { wave = resizeWave newSize f.wave }) st.stack }
 
 -- Build the (cat/rules/outW/outH/periodic) a fresh session needs from a
 -- Command — the same construction "run" always did, now shared with
