@@ -5,7 +5,7 @@ import Prelude
 import Data.Array as Array
 import Data.Either (Either(..), isLeft)
 import Data.Map as Map
-import Data.Maybe (Maybe(..), isJust)
+import Data.Maybe (Maybe(..), fromMaybe, isJust)
 import Data.Number (log)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
@@ -26,6 +26,7 @@ import WFC.Entropy (cellEntropy, cellsWithEntropy, minEntropyPos)
 import WFC.Collapse (collapseAt)
 import WFC.Propagate (propagate)
 import WFC.Algorithm (wfc, wfcWithRetry)
+import WFC.Backtrack (solveWithBacktracking)
 import WFC.Render (renderWave, renderWaveWith)
 
 -- ---------------------------------------------------------------------------
@@ -422,3 +423,74 @@ main = runSpecAndExitProcess [consoleReporter] do
         Left  _  -> fail "unexpected contradiction"
         Right w' ->
           Array.all (Array.all (_ /= -1)) (renderWaveWith (-1) w') `shouldEqual` true
+
+  -- =========================================================================
+  describe "Stage 9 · WFC.Backtrack — incremental backtracking recovery" do
+  -- =========================================================================
+  -- Backtracking undoes just the last guess (ban that value, try another at
+  -- the same cell) instead of restarting the whole wave like
+  -- `WFC.Algorithm.wfcWithRetry` does on contradiction.
+
+    it "solves a trivial 2×2 checkerboard, same as plain wfc" do
+      result <- liftEffect $ solveWithBacktracking 100 checker2x2Wave
+      case result of
+        Left  _  -> fail "unexpected contradiction in 2×2 checkerboard"
+        Right w' -> isFullyCollapsed w' `shouldEqual` true
+
+    it "maxAttempts = 0 fails immediately without collapsing anything" do
+      result <- liftEffect $ solveWithBacktracking 0 checker2x2Wave
+      isLeft result `shouldEqual` true
+
+    it "reliably solves a maze that plain single-shot wfc usually can't" do
+      -- This 11×11 maze at n=3, non-periodic, is tightly constrained enough
+      -- that a single un-retried `wfc` run fails almost every time (measured
+      -- ~19/20 across repeated manual runs) — demonstrating that undoing one
+      -- bad guess and trying a different value at the same cell recovers
+      -- where plain restart-free collapse can't, without throwing away the
+      -- whole wave.
+      let grid =
+            [ [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+            , [1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+            , [1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1]
+            , [1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1]
+            , [1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1]
+            , [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1]
+            , [1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1]
+            , [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1]
+            , [1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1]
+            , [1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]
+            , [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+            ]
+          cat   = extractPatterns 3 false 1 grid
+          rules = buildRules cat
+          wave  = initWave cat rules { width: 22, height: 22 } false
+
+          cellPidAt w x y = do
+            s <- getCellPossibilities w (Pos { x, y })
+            if Set.size s == 1
+              then Array.head (Set.toUnfoldable s :: Array PatternId)
+              else Nothing
+          patternOf pid = fromMaybe (Pattern []) (Map.lookup pid cat.patterns)
+
+      result <- liftEffect $ solveWithBacktracking 5000 wave
+      case result of
+        Left  _  -> fail "backtracking failed to solve a maze it should reliably handle"
+        Right w' -> do
+          isFullyCollapsed w' `shouldEqual` true
+          -- Structural correctness, not just "no cell ended up empty": every
+          -- adjacent pair of collapsed cells must genuinely satisfy the
+          -- overlap-agreement rule (same check used to validate the engine
+          -- against noise-output regressions earlier).
+          let violations = do
+                y <- Array.range 0 20
+                x <- Array.range 0 20
+                Tuple dir (Tuple ox oy) <- [ Tuple DirR (Tuple 1 0), Tuple DirD (Tuple 0 1) ]
+                let nx = x + ox
+                    ny = y + oy
+                case Tuple (cellPidAt w' x y) (cellPidAt w' nx ny) of
+                  Tuple (Just pidA) (Just pidB) ->
+                    if agrees 3 dir (patternOf pidA) (patternOf pidB)
+                      then []
+                      else [ Tuple (Tuple x y) (Tuple nx ny) ]
+                  _ -> []
+          violations `shouldEqual` []

@@ -21,6 +21,7 @@ work from.
 | Contradiction | `WFC.Propagate.Contradiction` |
 | Entropy heuristic | `WFC.Entropy.cellEntropy` / `minEntropyPos` |
 | Main loop | `WFC.Algorithm.step` / `wfc` / `wfcWithRetry` |
+| Incremental backtracking | `WFC.Backtrack.solveWithBacktracking` |
 | Overlapping-model extraction | `WFC.Catalog.extractPatterns` |
 | Automatic rule derivation | `WFC.Rules.buildRules` / `WFC.Pattern.agrees` |
 | Reconstructing the output | `WFC.Render.renderWave` |
@@ -164,6 +165,46 @@ needed.
 completion or failure) and the demo's own worker loop are built from — see
 [Where the demo's loop differs](#where-the-demos-loop-differs) below.
 
+## Incremental backtracking (`WFC.Backtrack`)
+
+Added 2026-07-08 alongside `wfc`/`wfcWithRetry`, not replacing them (the
+demo's worker still uses restart-based solving). `WFC.md` documents
+restart-on-failure and true backtracking — "undo just the last guess, ban
+that value, retry" — as two accepted contradiction-recovery strategies;
+this module is the second one.
+
+The key move that made this cheap: `Wave a` is a plain immutable record
+over `Data.Map`/`Data.Set` (persistent, structurally-shared trees), so
+snapshotting the *whole* wave before every guess costs nothing like a deep
+copy — unrelated branches are shared. That sidesteps needing `Contradiction`
+to carry any more state than it already does (still just the failing
+`Pos`): a search frame just pairs the pre-guess `Wave a` snapshot with the
+possibilities not yet tried at that cell —
+
+```purescript
+type Frame a = { wave :: Wave a, pos :: Pos, untried :: Set PatternId }
+```
+
+— and the loop is an explicit `NonEmptyList (Frame a)` stack, driven by
+`tailRecM` for stack-safety exactly like `WFC.Algorithm` already does: try
+a weighted-random pick from `untried` (reusing `WFC.Collapse.weightedSample`
+against a shrinking subset, not the full cell domain) via `propagate`; on
+`Left`, loop again on the *same* frame with that value removed from
+`untried`; on `Right`, push a new frame for the next lowest-entropy cell
+and recurse forward; once a frame's `untried` is empty, pop it — the parent
+frame's own `untried` is already correctly reduced from when it pushed the
+now-abandoned child, so the loop naturally tries the parent's next
+alternative. A `maxAttempts` budget (same shape as `wfcWithRetry`'s, but
+counting individual value-attempts, not full restarts) caps runaway search
+on a genuinely-unsatisfiable ruleset.
+
+Verified in `test/Test/Main.purs` ("Stage 9") against an 11×11 maze sample
+tight enough that plain single-shot `wfc` fails on it ~95–100% of the time
+(measured across repeated runs) — `solveWithBacktracking` solves the same
+wave reliably, and the solved result is checked against the same
+pairwise-`agrees` structural-correctness test used earlier this session,
+not just "returned `Right`."
+
 ## The overlapping model: extraction and rule derivation
 
 `WFC.Catalog.extractPatterns` is `WFC.md`'s three-part "derive tileset +
@@ -248,25 +289,21 @@ how much they'd affect correctness/capability if left alone.
    has one `periodic :: Boolean` fed to both. **Decided (2026-07-08): not
    needed** — left as-is, not planned.
 
-3. **Only full-restart contradiction recovery, no incremental
-   backtracking.** `WFC.md` presents restart-on-failure and true
+3. ~~**Only full-restart contradiction recovery, no incremental
+   backtracking.**~~ `WFC.md` presents restart-on-failure and true
    backtracking (undo just the last guess, ban that value, retry) as two
-   accepted strategies. This repo only implements the former
-   (`wfcWithRetry`). This is an accepted, commonly-used tradeoff per
-   `WFC.md` itself, not a bug — but it's worth being explicit that
-   incremental backtracking is simply absent, not "implemented but
-   inactive."
+   accepted strategies; this repo only implemented the former
+   (`wfcWithRetry`). **Fixed 2026-07-08** — see [Incremental
+   backtracking](#incremental-backtracking-wfcbacktrack) above
+   (`WFC.Backtrack.solveWithBacktracking`), added alongside `wfcWithRetry`
+   rather than replacing it (the demo still uses restart-based solving).
 
-4. **`Contradiction` only carries the failing `Pos`, not the wave state at
-   the moment of failure.** `propagate`/`processBan` return as soon as a
-   cell empties out, discarding whatever partial propagation had already
-   happened during that failed step. This was already a practical
-   limitation the demo had to work around (`Demo.WorkerProtocol.markContradiction`
-   reconstructs a plausible-looking failure snapshot from the *last known
-   good* wave instead of the real one). It also means item 3 above
-   (incremental backtracking) isn't just "unimplemented" — the data needed
-   to implement it isn't currently threaded through `Either Contradiction`
-   at all.
+4. ~~**`Contradiction` only carries the failing `Pos`, not the wave state at
+   the moment of failure.**~~ True, and still the case — but turned out not
+   to matter for #3: backtracking only ever needs the wave state *before*
+   a guess, which a cheap per-guess snapshot provides directly, without
+   widening `Contradiction`'s shape at all. **Resolved 2026-07-08** as a
+   non-issue in practice, alongside #3.
 
 5. **No support for `WFC.md`'s "Extensions beyond the basic grid"** —
    non-Euclidean/hex/3D grids, multi-cell modules (a value spanning more
@@ -291,17 +328,12 @@ Live to-do list distilled from the differences above. Trim an item once
 it's actually done (or decided against, like #2/#7 above); don't leave
 resolved items in this section.
 
-1. **Decide on incremental backtracking (#3/#4).** Is it worth the added
-   complexity? It would require `Contradiction` (or a new return type) to
-   carry enough in-progress propagation state to undo just the last guess
-   and ban that value, rather than restarting from scratch — a more
-   invasive change than anything done so far. No decision made yet either
-   way; revisit when contradiction frequency/restart cost actually becomes
-   a problem in practice, rather than speculatively.
-2. **Tiled-model support (#1)** — a hand-authored tileset + per-edge
+1. **Tiled-model support (#1)** — a hand-authored tileset + per-edge
    adjacency ("sockets") mode, as an alternative to always mining patterns
    from a source image via `extractPatterns`. Larger, separable feature;
    no timeline.
-3. **Grid/adjacency extensions (#5)** — non-Euclidean/hex/3D grids,
+2. **Grid/adjacency extensions (#5)** — non-Euclidean/hex/3D grids,
    multi-cell modules, weighted (not just allow/disallow) adjacency. Larger,
    separable feature; no timeline.
+
+(#3/#4 — incremental backtracking — done 2026-07-08, see `WFC.Backtrack`.)
