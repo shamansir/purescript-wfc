@@ -79,6 +79,35 @@
       color: #8b949e;
     }
 
+    /* ---- Progress bar ---- */
+    .progress-bar {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 1px;
+      overflow-x: auto;
+      padding: 4px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      max-width: 100%;
+    }
+
+    .progress-cell {
+      flex: 0 0 auto;
+      width: 8px;
+      height: 20px;
+      border-radius: 1px;
+      cursor: default;
+    }
+
+    .progress-cell.restarted {
+      box-shadow: inset 2px 0 0 0 #f4d03f;
+    }
+
+    .progress-cell.contradiction {
+      box-shadow: inset 0 0 0 1px #ffffff;
+    }
+
     /* ---- Pattern section ---- */
     .pattern-section {
       display: flex;

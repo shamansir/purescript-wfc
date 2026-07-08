@@ -5,11 +5,10 @@ import Prelude
 import Data.Array as Array
 import Data.DateTime.Instant (Instant, unInstant)
 import Data.Either (Either(..))
+import Data.Foldable (for_)
 import Data.Int as Int
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
-import Data.Set (Set)
-import Data.Set as Set
 import Data.Time.Duration (Milliseconds(..))
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
@@ -20,43 +19,61 @@ import Halogen as H
 import Halogen.HTML as HH
 import Halogen.HTML.Events as HE
 import Halogen.HTML.Properties as HP
+import Halogen.Subscription as HS
+import Unsafe.Coerce (unsafeCoerce)
 
 import Demo.Samples (SampleDef, samples)
+import Demo.WorkerProtocol (Grid, CellSnapshot)
+import Demo.WorkerProtocol as WP
 import WFC.Algorithm (step)
 import WFC.Catalog (PatternCatalog, extractPatterns)
-import WFC.Grid (Pos(..), allPositions)
-import WFC.Pattern (Pattern(..), PatternId(..))
+import WFC.Grid (Pos(..))
+import WFC.Pattern (Pattern(..), PatternId)
+import WFC.Propagate (Contradiction(..)) as Propagate
 import WFC.Rules (AdjacencyRules, buildRules)
-import WFC.Wave (Wave, getCellPossibilities, initWave)
+import WFC.Wave (Wave, initWave)
+import Web.Worker.MessageEvent (MessageEvent)
+import Web.Worker.MessageEvent as MessageEvent
+import Web.Worker.Worker (Worker)
+import Web.Worker.Worker as Worker
 
 -- ---------------------------------------------------------------------------
 -- Types
 -- ---------------------------------------------------------------------------
 
-data WFCStatus = Idle | Ready | Stepped | Done | Contradiction
+data WFCStatus = Idle | Ready | Stepped | Done | Contradiction | Stopped
 
 derive instance eqWFCStatus :: Eq WFCStatus
 
 type State =
-  { sampleIdx :: Int
-  , status    :: WFCStatus
-  , catalog   :: Maybe (PatternCatalog Int)
-  , rules     :: Maybe AdjacencyRules
-  , wave      :: Maybe (Wave Int)
-  , initWave_ :: Maybe (Wave Int)
-  , stepCount :: Int
-  , stepTimes :: Array Number
-  , totalTime :: Number
-  , showPats  :: Boolean
+  { sampleIdx   :: Int
+  , status      :: WFCStatus
+  , catalog     :: Maybe (PatternCatalog Int)
+  , rules       :: Maybe AdjacencyRules
+  , wave        :: Maybe (Wave Int)
+  , initWave_   :: Maybe (Wave Int)
+  , stepCount   :: Int
+  , stepTimes   :: Array Number
+  , totalTime   :: Number
+  , showPats    :: Boolean
+  , worker        :: Maybe Worker
+  , running       :: Boolean
+  , stopRequested :: Boolean
+  , displayGrid   :: Maybe Grid
+  , progressLog   :: Array WP.Progress
   }
 
 data Action
   = Init
+  | Finalize
   | SelectSample Int
   | ExtractPatterns
   | StepOnce
   | ResetWave
-  | RunAll
+  | RunOnce
+  | RunUntilSolved
+  | Stop
+  | WorkerMsg MessageEvent
   | TogglePatterns
 
 type Slots :: forall k. Row k
@@ -68,16 +85,21 @@ type Slots = ()
 
 initialState :: State
 initialState =
-  { sampleIdx: 0
-  , status:    Idle
-  , catalog:   Nothing
-  , rules:     Nothing
-  , wave:      Nothing
-  , initWave_: Nothing
-  , stepCount: 0
-  , stepTimes: []
-  , totalTime: 0.0
-  , showPats:  false
+  { sampleIdx:   0
+  , status:      Idle
+  , catalog:     Nothing
+  , rules:       Nothing
+  , wave:        Nothing
+  , initWave_:   Nothing
+  , stepCount:   0
+  , stepTimes:   []
+  , totalTime:   0.0
+  , showPats:    false
+  , worker:        Nothing
+  , running:       false
+  , stopRequested: false
+  , displayGrid:   Nothing
+  , progressLog:   []
   }
 
 -- ---------------------------------------------------------------------------
@@ -103,49 +125,11 @@ unsafeHead arr = case Array.head arr of
   Just x  -> x
   Nothing -> unsafeHead arr  -- should never happen for non-empty arrays
 
--- Top-left pixel color for a given pattern in a catalog
-patColor :: SampleDef -> PatternCatalog Int -> PatternId -> String
-patColor sample cat pid = fromMaybe "#888888" do
-  Pattern px <- Map.lookup pid cat.patterns
-  v <- Array.head px
-  pure (sample.palette v)
+stopCommand :: WP.Command
+stopCommand = { kind: "stop", sampleIdx: 0, mode: "" }
 
-cellColor :: SampleDef -> Maybe (PatternCatalog Int) -> Maybe (Set PatternId) -> String
-cellColor _ _ Nothing = "#ff4444"
-cellColor _ Nothing (Just _) = "#888888"
-cellColor sample (Just cat) (Just pids)
-  | Set.isEmpty pids = "#ff4444"
-  | Set.size pids == 1 =
-      fromMaybe "#888888" do
-        pid <- Array.head (Set.toUnfoldable pids :: Array PatternId)
-        Pattern px <- Map.lookup pid cat.patterns
-        v <- Array.head px
-        pure (sample.palette v)
-  | otherwise = "#c0c0d0"
-
--- Run all steps in Effect, counting them
-runAllEffect :: Wave Int -> Effect { wave :: Maybe (Wave Int), steps :: Int }
-runAllEffect w0 = go w0 0
-  where
-    go w n = do
-      r <- step w
-      case r of
-        Left  _          -> pure { wave: Nothing, steps: n }
-        Right Nothing    -> pure { wave: Just w, steps: n }
-        Right (Just w')  -> go w' (n + 1)
-
--- Run all steps, restarting from the pristine initial wave on contradiction.
--- A contradiction is a normal, expected outcome of the random collapse order
--- (not a bug) — retrying from scratch a few times is the standard WFC fix.
-runAllWithRetryEffect :: Int -> Wave Int -> Effect { wave :: Maybe (Wave Int), steps :: Int }
-runAllWithRetryEffect maxAttempts w0 = go maxAttempts
-  where
-    go 0 = pure { wave: Nothing, steps: 0 }
-    go n = do
-      res <- runAllEffect w0
-      case res.wave of
-        Just _  -> pure res
-        Nothing -> go (n - 1)
+runCommand :: Int -> String -> WP.Command
+runCommand sampleIdx mode = { kind: "run", sampleIdx, mode }
 
 -- ---------------------------------------------------------------------------
 -- Canvas drawing
@@ -163,33 +147,72 @@ drawCanvasEffect st = do
       Canvas.clearRect ctx { x: 0.0, y: 0.0, width: cw, height: ch }
       Canvas.setFillStyle ctx "#1a1a2e"
       Canvas.fillRect ctx { x: 0.0, y: 0.0, width: cw, height: ch }
-      case st.wave of
+      case st.displayGrid of
         Nothing   -> pure unit
-        Just wave -> do
-          let size = wave.size
-              cellW = cw / Int.toNumber size.width
-              cellH = ch / Int.toNumber size.height
-              sampleDef = currentSample st
-          void $ Array.foldM
-            (\_ pos -> do
-              let Pos { x, y } = pos
-                  cell  = getCellPossibilities wave pos
-                  color = cellColor sampleDef st.catalog cell
+        Just grid -> do
+          let height = Array.length grid
+              width  = fromMaybe 0 (map Array.length (Array.head grid))
+          when (width > 0 && height > 0) do
+            let cellW = cw / Int.toNumber width
+                cellH = ch / Int.toNumber height
+                sampleDef = currentSample st
+                cells = Array.concat
+                  (Array.mapWithIndex
+                    (\y row -> Array.mapWithIndex (\x cell -> Tuple (Tuple x y) cell) row)
+                    grid)
+            Canvas.setFont ctx (show (Int.floor (min cellW cellH * 0.7)) <> "px sans-serif")
+            Canvas.setTextAlign ctx Canvas.AlignCenter
+            for_ cells \(Tuple (Tuple x y) cell) -> do
+              let color = WP.cellColor sampleDef cell
+                  px    = Int.toNumber x * cellW
+                  py    = Int.toNumber y * cellH
               Canvas.setFillStyle ctx color
               Canvas.fillRect ctx
-                { x:      Int.toNumber x * cellW
-                , y:      Int.toNumber y * cellH
+                { x:      px
+                , y:      py
                 , width:  cellW - 0.5
                 , height: cellH - 0.5
                 }
-            )
-            unit
-            (allPositions size)
+              when cell.contradiction do
+                Canvas.setFillStyle ctx "#ffffff"
+                Canvas.fillText ctx "?" (px + cellW / 2.0) (py + cellH * 0.72)
 
 drawCanvas :: H.HalogenM State Action Slots Void Aff Unit
 drawCanvas = do
   st <- H.get
   H.liftEffect $ drawCanvasEffect st
+
+-- ---------------------------------------------------------------------------
+-- Worker plumbing
+-- ---------------------------------------------------------------------------
+
+-- Lazily spawn the worker and subscribe to its messages; reused across runs.
+ensureWorker :: H.HalogenM State Action Slots Void Aff Worker
+ensureWorker = do
+  st <- H.get
+  case st.worker of
+    Just w  -> pure w
+    Nothing -> do
+      w <- H.liftEffect (Worker.new "worker.js" Worker.defaultWorkerOptions)
+      let emitter = HS.makeEmitter \emit -> do
+            Worker.onMessage (\ev -> emit (WorkerMsg ev)) w
+            pure (pure unit)
+      _ <- H.subscribe emitter
+      H.modify_ _ { worker = Just w }
+      pure w
+
+startRun :: String -> H.HalogenM State Action Slots Void Aff Unit
+startRun mode = do
+  st <- H.get
+  w  <- ensureWorker
+  H.modify_ _
+    { running       = true
+    , stopRequested = false
+    , status        = Stepped
+    , progressLog   = []
+    , displayGrid   = Nothing
+    }
+  H.liftEffect $ Worker.postMessage (runCommand st.sampleIdx mode) w
 
 -- ---------------------------------------------------------------------------
 -- Component
@@ -199,7 +222,10 @@ component :: forall q i. H.Component q i Void Aff
 component = H.mkComponent
   { initialState: const initialState
   , render
-  , eval: H.mkEval H.defaultEval { handleAction = handleAction }
+  , eval: H.mkEval H.defaultEval
+      { handleAction = handleAction
+      , finalize     = Just Finalize
+      }
   }
 
 -- ---------------------------------------------------------------------------
@@ -223,6 +249,7 @@ renderSidebar st =
         (Array.mapWithIndex renderOption samples)
     , renderButtons st
     , renderStats st
+    , renderProgress st
     , renderPatterns st
     ]
 
@@ -249,19 +276,29 @@ renderButtons st =
         [ HH.text "⊞ Patterns" ]
     , HH.button
         [ HE.onClick \_ -> StepOnce
-        , HP.disabled notReady
+        , HP.disabled (notReady || st.running)
         ]
         [ HH.text "▶ Step" ]
     , HH.button
         [ HE.onClick \_ -> ResetWave
-        , HP.disabled noStepsTaken
+        , HP.disabled (noStepsTaken || st.running)
         ]
         [ HH.text "■ Reset" ]
     , HH.button
-        [ HE.onClick \_ -> RunAll
-        , HP.disabled notReady
+        [ HE.onClick \_ -> RunOnce
+        , HP.disabled (notReady || st.running)
         ]
-        [ HH.text "⏩ Run All" ]
+        [ HH.text "▶ Run once" ]
+    , HH.button
+        [ HE.onClick \_ -> RunUntilSolved
+        , HP.disabled (notReady || st.running)
+        ]
+        [ HH.text "⏩ Run until solved" ]
+    , HH.button
+        [ HE.onClick \_ -> Stop
+        , HP.disabled (not st.running)
+        ]
+        [ HH.text "■ Stop" ]
     ]
 
 renderStats :: State -> H.ComponentHTML Action Slots Aff
@@ -278,17 +315,53 @@ renderStats st =
         <> " | Last: " <> fmtMs lastMs
         <> " | Total: " <> fmtMs st.totalTime
       statusStr = case st.status of
-        Idle         -> "Idle"
-        Ready        -> "Ready"
-        Stepped      -> "Stepping..."
-        Done         -> "Done"
+        Idle          -> "Idle"
+        Ready         -> "Ready"
+        Stepped       -> "Stepping..."
+        Done          -> "Done"
         Contradiction -> "Contradiction!"
+        Stopped       -> "Stopped"
   in
   HH.div
     [ HP.class_ (H.ClassName "stats") ]
     [ HH.div_ [ HH.text ("Status: " <> statusStr) ]
     , HH.div_ [ HH.text statsStr ]
     ]
+
+-- Horizontal strip of squares, one per step reported so far; persists until
+-- the next run clears it. Hover shows step/solved/elapsed detail.
+renderProgress :: State -> H.ComponentHTML Action Slots Aff
+renderProgress st =
+  if Array.null st.progressLog
+    then HH.text ""
+    else
+      HH.div
+        [ HP.class_ (H.ClassName "progress-bar") ]
+        (Array.mapWithIndex (\_ p -> renderProgressCell p) st.progressLog)
+
+renderProgressCell :: WP.Progress -> H.ComponentHTML Action Slots Aff
+renderProgressCell p =
+  let intensity  = min 1.0 (Int.toNumber p.solvedDelta / 10.0)
+      lightness  = 22 + Int.floor (intensity * 55.0)
+      isContra   = p.kind == "contradiction"
+      bg         = if isContra then "#ff4444" else "hsl(210, 70%, " <> show lightness <> "%)"
+      extraClass =
+        (if p.restarted then " restarted" else "")
+        <> (if isContra then " contradiction" else "")
+      tip =
+        "step " <> show p.step
+        <> " — solved +" <> show p.solvedDelta
+        <> " (" <> show p.solvedTotal <> "/" <> show p.totalCells <> ")"
+        <> " — " <> fmtMs p.elapsedMs
+        <> (if p.restarted then " — attempt restarted here" else "")
+        <> (if isContra then " — contradiction" else "")
+  in
+  HH.div
+    [ HP.class_ (H.ClassName ("progress-cell" <> extraClass))
+    , HP.style ("background:" <> bg <> ";")
+    , HP.title tip
+    ]
+    []
 
 renderPatterns :: State -> H.ComponentHTML Action Slots Aff
 renderPatterns st =
@@ -353,58 +426,41 @@ renderMain st =
 
 renderMatrix :: State -> H.ComponentHTML Action Slots Aff
 renderMatrix st =
-  case st.wave of
+  case st.displayGrid of
     Nothing   -> HH.text ""
-    Just wave ->
+    Just grid ->
       let sample = currentSample st
-          size   = wave.size
-          rows   = Array.range 0 (size.height - 1)
       in
       HH.table
         [ HP.class_ (H.ClassName "matrix") ]
-        (map (\y ->
-          HH.tr_
-            (map (\x ->
-              renderCell st sample wave (Pos { x, y })
-            ) (Array.range 0 (size.width - 1)))
-        ) rows)
+        (map (\row ->
+          HH.tr_ (map (renderCell sample) row)
+        ) grid)
 
-renderCell
-  :: State
-  -> SampleDef
-  -> Wave Int
-  -> Pos
-  -> H.ComponentHTML Action Slots Aff
-renderCell st sample wave pos =
-  case getCellPossibilities wave pos of
-    Nothing    ->
+renderCell :: SampleDef -> CellSnapshot -> H.ComponentHTML Action Slots Aff
+renderCell sample cell
+  | cell.contradiction =
       HH.td
         [ HP.style "background:#ff4444;color:white;text-align:center;" ]
-        [ HH.text "×" ]
-    Just pids
-      | Set.size pids == 1 ->
-          let pid = fromMaybe (PatternId 0) (Array.head (Set.toUnfoldable pids :: Array PatternId))
-              bg  = case st.catalog of
-                      Nothing  -> "#888888"
-                      Just cat -> patColor sample cat pid
-          in
-          HH.td
-            [ HP.style ("background:" <> bg <> ";font-size:8px;text-align:center;") ]
-            [ HH.text (show pid) ]
-      | otherwise ->
-          let visible = Array.take 9 (Set.toUnfoldable pids :: Array PatternId)
-              spans   = map (\pid ->
-                let c = case st.catalog of
-                          Nothing  -> "#888888"
-                          Just cat -> patColor sample cat pid
-                in HH.span
-                     [ HP.style ("background:" <> c <> ";") ]
-                     [ HH.text "" ]
-                ) visible
-          in
-          HH.td
-            [ HP.class_ (H.ClassName "uncollapsed") ]
-            [ HH.div [ HP.class_ (H.ClassName "sudoku") ] spans ]
+        [ HH.text "?" ]
+  | cell.collapsed =
+      let bg   = WP.cellColor sample cell
+          text = fromMaybe "" (map show (Array.head cell.values))
+      in
+      HH.td
+        [ HP.style ("background:" <> bg <> ";font-size:8px;text-align:center;") ]
+        [ HH.text text ]
+  | otherwise =
+      let visible = Array.take 9 cell.values
+          spans   = map (\v ->
+            HH.span
+              [ HP.style ("background:" <> sample.palette v <> ";") ]
+              []
+            ) visible
+      in
+      HH.td
+        [ HP.class_ (H.ClassName "uncollapsed") ]
+        [ HH.div [ HP.class_ (H.ClassName "sudoku") ] spans ]
 
 -- ---------------------------------------------------------------------------
 -- handleAction
@@ -415,19 +471,31 @@ handleAction = case _ of
 
   Init -> pure unit
 
-  SelectSample idx ->
-    H.modify_ \st ->
-      { sampleIdx: idx
-      , status:    Idle
-      , catalog:   (Nothing :: Maybe (PatternCatalog Int))
-      , rules:     (Nothing :: Maybe AdjacencyRules)
-      , wave:      (Nothing :: Maybe (Wave Int))
-      , initWave_: (Nothing :: Maybe (Wave Int))
-      , stepCount: 0
-      , stepTimes: ([] :: Array Number)
-      , totalTime: 0.0
-      , showPats:  st.showPats
+  Finalize -> do
+    st <- H.get
+    for_ st.worker (H.liftEffect <<< Worker.terminate)
+
+  SelectSample idx -> do
+    st <- H.get
+    for_ st.worker (H.liftEffect <<< Worker.postMessage stopCommand)
+    H.modify_ \s ->
+      { sampleIdx:   idx
+      , status:      Idle
+      , catalog:     (Nothing :: Maybe (PatternCatalog Int))
+      , rules:       (Nothing :: Maybe AdjacencyRules)
+      , wave:        (Nothing :: Maybe (Wave Int))
+      , initWave_:   (Nothing :: Maybe (Wave Int))
+      , stepCount:   0
+      , stepTimes:   ([] :: Array Number)
+      , totalTime:   0.0
+      , showPats:      s.showPats
+      , worker:        s.worker
+      , running:       false
+      , stopRequested: true
+      , displayGrid:   Nothing
+      , progressLog:   ([] :: Array WP.Progress)
       }
+    drawCanvas
 
   ExtractPatterns -> do
     st <- H.get
@@ -436,87 +504,95 @@ handleAction = case _ of
         rules  = buildRules cat
         wave   = initWave cat rules { width: sample.outW, height: sample.outH } sample.periodic
     H.modify_ \s -> s
-      { status    = Ready
-      , catalog   = Just cat
-      , rules     = Just rules
-      , wave      = Just wave
-      , initWave_ = Just wave
-      , stepCount = 0
-      , stepTimes = ([] :: Array Number)
-      , totalTime = 0.0
+      { status      = Ready
+      , catalog     = Just cat
+      , rules       = Just rules
+      , wave        = Just wave
+      , initWave_   = Just wave
+      , stepCount   = 0
+      , stepTimes   = ([] :: Array Number)
+      , totalTime   = 0.0
+      , displayGrid = Just (WP.waveToSnapshot cat wave)
+      , progressLog = []
       }
     drawCanvas
 
   StepOnce -> do
     st <- H.get
-    case st.wave of
-      Nothing   -> pure unit
-      Just wave -> do
+    case Tuple st.catalog st.wave of
+      Tuple (Just cat) (Just wave) -> do
         t0 <- H.liftEffect now
         result <- H.liftEffect (step wave)
         t1 <- H.liftEffect now
         let elapsed = timeDiff t0 t1
         case result of
-          Left _ ->
+          Left (Propagate.Contradiction (Pos p)) ->
             H.modify_ \s -> s
-              { status    = Contradiction
-              , stepCount = s.stepCount + 1
-              , stepTimes = Array.snoc s.stepTimes elapsed
-              , totalTime = s.totalTime + elapsed
+              { status      = Contradiction
+              , stepCount   = s.stepCount + 1
+              , stepTimes   = Array.snoc s.stepTimes elapsed
+              , totalTime   = s.totalTime + elapsed
+              , displayGrid = Just (WP.markContradiction p.x p.y (WP.waveToSnapshot cat wave))
               }
           Right Nothing ->
             H.modify_ \s -> s
-              { status    = Done
-              , stepCount = s.stepCount + 1
-              , stepTimes = Array.snoc s.stepTimes elapsed
-              , totalTime = s.totalTime + elapsed
+              { status      = Done
+              , stepCount   = s.stepCount + 1
+              , stepTimes   = Array.snoc s.stepTimes elapsed
+              , totalTime   = s.totalTime + elapsed
+              , displayGrid = Just (WP.waveToSnapshot cat wave)
               }
           Right (Just wave') ->
             H.modify_ \s -> s
-              { wave      = Just wave'
-              , status    = Stepped
-              , stepCount = s.stepCount + 1
-              , stepTimes = Array.snoc s.stepTimes elapsed
-              , totalTime = s.totalTime + elapsed
+              { wave        = Just wave'
+              , status      = Stepped
+              , stepCount   = s.stepCount + 1
+              , stepTimes   = Array.snoc s.stepTimes elapsed
+              , totalTime   = s.totalTime + elapsed
+              , displayGrid = Just (WP.waveToSnapshot cat wave')
               }
         drawCanvas
+      _ -> pure unit
 
   ResetWave -> do
-    H.modify_ \st -> st
-      { wave      = st.initWave_
-      , status    = Ready
-      , stepCount = 0
-      , stepTimes = ([] :: Array Number)
-      , totalTime = 0.0
+    st <- H.get
+    H.modify_ \s -> s
+      { wave        = s.initWave_
+      , status      = Ready
+      , stepCount   = 0
+      , stepTimes   = ([] :: Array Number)
+      , totalTime   = 0.0
+      , displayGrid = case Tuple st.catalog st.initWave_ of
+          Tuple (Just cat) (Just w) -> Just (WP.waveToSnapshot cat w)
+          _                         -> st.displayGrid
       }
     drawCanvas
 
-  RunAll -> do
+  RunOnce        -> startRun "once"
+  RunUntilSolved -> startRun "untilSolved"
+
+  Stop -> do
     st <- H.get
-    case st.initWave_ of
-      Nothing   -> pure unit
-      Just freshWave -> do
-        t0 <- H.liftEffect now
-        res <- H.liftEffect (runAllWithRetryEffect 30 freshWave)
-        t1 <- H.liftEffect now
-        let elapsed = timeDiff t0 t1
-        case res.wave of
-          Nothing ->
-            H.modify_ \s -> s
-              { status    = Contradiction
-              , stepCount = res.steps
-              , stepTimes = [ elapsed ]
-              , totalTime = elapsed
-              }
-          Just w' ->
-            H.modify_ \s -> s
-              { wave      = Just w'
-              , status    = Done
-              , stepCount = res.steps
-              , stepTimes = [ elapsed ]
-              , totalTime = elapsed
-              }
-        drawCanvas
+    for_ st.worker (H.liftEffect <<< Worker.postMessage stopCommand)
+    H.modify_ _ { running = false, stopRequested = true, status = Stopped }
+
+  WorkerMsg ev -> do
+    st <- H.get
+    -- A step already in flight when Stop was clicked can still land after
+    -- it; once the user has asked to stop, ignore further worker chatter
+    -- for this run instead of letting a straggler flip `running` back on.
+    unless st.stopRequested do
+      let msg = unsafeCoerce (MessageEvent.data_ ev) :: WP.Progress
+      H.modify_ \s -> s
+        { progressLog = Array.snoc s.progressLog msg
+        , displayGrid = Just msg.grid
+        , running     = msg.kind == "progress"
+        , status      = case msg.kind of
+            "done"          -> Done
+            "contradiction" -> Contradiction
+            _               -> s.status
+        }
+      drawCanvas
 
   TogglePatterns ->
     H.modify_ \st -> st { showPats = not st.showPats }

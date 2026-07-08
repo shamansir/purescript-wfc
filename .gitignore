@@ -12,3 +12,4 @@ generated-docs/
 .spago
 .spec-results
 test/Demo/index.js
+test/Demo/worker.js

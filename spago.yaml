@@ -32,6 +32,10 @@ package:
       - web-html
       - aff
       - datetime
+      - web-workers
+      - unsafe-coerce
+      - refs
+      - foreign
 workspace:
   packageSet:
     registry: 77.10.0

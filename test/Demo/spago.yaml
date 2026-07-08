@@ -18,3 +18,7 @@ package:
     - maybe
     - either
     - numbers
+    - web-workers
+    - unsafe-coerce
+    - refs
+    - foreign

@@ -12,6 +12,7 @@
             "effect",
             "either",
             "foldable-traversable",
+            "foreign",
             "halogen",
             "integers",
             "maybe",
@@ -19,8 +20,11 @@
             "numbers",
             "ordered-collections",
             "prelude",
+            "refs",
             "tuples",
+            "unsafe-coerce",
             "web-html",
+            "web-workers",
             "wfc"
           ]
         },
@@ -57,13 +61,17 @@
             "arrays",
             "canvas",
             "datetime",
+            "foreign",
             "halogen",
             "now",
             "numbers",
             "ordered-collections",
+            "refs",
             "spec",
             "spec-node",
-            "web-html"
+            "unsafe-coerce",
+            "web-html",
+            "web-workers"
           ]
         }
       }
@@ -2069,6 +2077,19 @@
         "unsafe-coerce",
         "web-events",
         "web-html"
+      ]
+    },
+    "web-workers": {
+      "type": "registry",
+      "version": "1.1.0",
+      "integrity": "sha256-SPl6kSHOzCyGt+rFlBMLJjWAwnWgCcb8pl8KTZnJPos=",
+      "dependencies": [
+        "effect",
+        "foreign",
+        "maybe",
+        "prelude",
+        "unsafe-coerce",
+        "web-events"
       ]
     }
   }
