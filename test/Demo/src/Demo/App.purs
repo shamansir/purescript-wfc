@@ -2,15 +2,19 @@ module Demo.App where
 
 import Prelude
 
+import Control.Alternative (guard)
 import Data.Array as Array
 import Data.Either (Either(..))
 import Data.Foldable (for_)
 import Data.Int as Int
+import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe, maybe)
+import Data.Number (pi)
+import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
-import Effect.Aff (Aff)
+import Effect.Aff (Aff, makeAff, nonCanceler)
 import Graphics.Canvas as Canvas
 import Halogen as H
 import Halogen.HTML as HH
@@ -34,6 +38,7 @@ import WFC.Rules (buildRules)
 import WFC.Tiles (buildTiledCatalog, buildTiledRules)
 import WFC.TileSet.Xml (parseTileSetXml)
 import WFC.TileSet as TS
+import WFC.TileSet.Symmetry (distinctOrientations)
 import WFC.Wave (Wave, initWave)
 import Web.Event.Event as Event
 import Web.File.FileList as FileList
@@ -62,6 +67,7 @@ type State =
   , showPats    :: Boolean
   , worker        :: Maybe Worker
   , running       :: Boolean
+  , untilSolvedRunning :: Boolean -- true only while a "Run until solved" is in flight; keeps Reset clickable through it
   , cmdSeq        :: Int -- mirrors the worker's internal request counter; see `sendToWorker`
   , displayGrid   :: Maybe Grid
   , progressLog   :: Array WP.Progress
@@ -79,7 +85,10 @@ type State =
   , extractedWith   :: Maybe ExtractSettings -- settings `catalog` was actually extracted with
   , stepBackedOut   :: Boolean -- the last manual Step performed a backtrack pop (WFC.Backtrack.BackedOut)
   , customTileSet   :: Maybe TS.TileSetDef -- fetched+parsed XML tileset, for SrcXmlTileset (mirrors customImage)
+  , xmlTilesetDir   :: Maybe String -- directory holding the active tileset's PNGs, set alongside customTileSet
   , tilesetPalette  :: Maybe (Int -> String) -- built alongside `catalog` at Extract time, for SrcXmlTileset only
+  , tilesetTileOf   :: Maybe (Int -> Maybe WP.TileRef) -- ditto — which tile+orientation a pattern's Int stands for
+  , tilesetImageCache :: Map String Canvas.CanvasImageSource -- preloaded per-tile PNGs, keyed by src URL
   }
 
 -- Which of the demo's 4 sample sources is currently selected, derived
@@ -144,6 +153,7 @@ initialState =
   , showPats:    false
   , worker:        Nothing
   , running:       false
+  , untilSolvedRunning: false
   , cmdSeq:        0
   , displayGrid:   Nothing
   , progressLog:   []
@@ -161,7 +171,10 @@ initialState =
   , extractedWith:   Nothing
   , stepBackedOut:   false
   , customTileSet:   Nothing
+  , xmlTilesetDir:   Nothing
   , tilesetPalette:  Nothing
+  , tilesetTileOf:   Nothing
+  , tilesetImageCache: Map.empty
   }
 
 -- ---------------------------------------------------------------------------
@@ -345,12 +358,14 @@ resetRunState s = s
   , stepTimes     = []
   , totalTime     = 0.0
   , running       = false
+  , untilSolvedRunning = false
   , displayGrid   = Nothing
   , progressLog   = []
   , viewedStep    = Nothing
   , extractedWith = Nothing
   , stepBackedOut = false
   , tilesetPalette = Nothing
+  , tilesetTileOf = Nothing
   }
 
 -- Reasonable defaults for a freshly-decoded upload: N=3 when the image is at
@@ -378,8 +393,95 @@ customImageFrom loaded =
   }
 
 -- ---------------------------------------------------------------------------
+-- XML tileset image rendering
+-- ---------------------------------------------------------------------------
+
+-- A `TileRef.orientation` is an index into a tile's own `0 .. cardinality-1`
+-- distinct pictures (see `WFC.TileSet.Symmetry`) — for `L`/`T`/`I`/`\`/`X`
+-- classes that's always a plain rotation (`(idx mod 4) * 90°`, no mirror);
+-- `F` (cardinality 8) additionally uses indices 4-7 for the mirrored half.
+-- This holds uniformly across all 6 classes given how `distinctOrientations`/
+-- `rotateIndex` are built (index *is* "how many 90° steps from the base
+-- picture, wrapping into the mirrored half past 3") — no per-class casing
+-- needed here.
+orientationTransform :: Int -> { rotationDeg :: Int, mirrored :: Boolean }
+orientationTransform idx = { rotationDeg: (idx `mod` 4) * 90, mirrored: idx >= 4 }
+
+-- Where a tile+orientation's PNG lives: `unique` tilesets (e.g. Summer.xml)
+-- have a separate image per orientation ("cliff 0.png".."cliff 3.png");
+-- everything else has one base image per tile name, rotated/mirrored at
+-- render time instead.
+tileImageSrc :: String -> Boolean -> WP.TileRef -> String
+tileImageSrc dir unique ref =
+  if unique
+    then dir <> "/" <> ref.name <> " " <> show ref.orientation <> ".png"
+    else dir <> "/" <> ref.name <> ".png"
+
+-- Every distinct image URL a tileset's patterns could need, so they can
+-- all be preloaded together right after Extract (well before a run
+-- reaches "Done" and actually wants to draw them).
+allTileImageSrcs :: String -> TS.TileSetDef -> Array String
+allTileImageSrcs dir def =
+  Array.nub $ def.tiles >>= \t ->
+    map (\o -> tileImageSrc dir def.unique { name: t.name, orientation: o })
+      (distinctOrientations t.symmetry)
+
+loadTilesetImage :: String -> Aff (Maybe Canvas.CanvasImageSource)
+loadTilesetImage url = makeAff \respond -> do
+  Canvas.tryLoadImage url (respond <<< Right)
+  pure nonCanceler
+
+loadAllTilesetImages :: String -> TS.TileSetDef -> Aff (Map String Canvas.CanvasImageSource)
+loadAllTilesetImages dir def = do
+  let srcs = allTileImageSrcs dir def
+  loaded <- traverse (\src -> Tuple src <$> loadTilesetImage src) srcs
+  pure (Map.fromFoldable (Array.mapMaybe (\(Tuple src m) -> Tuple src <$> m) loaded))
+
+-- For the Patterns panel (plain Halogen HTML, not a `<canvas>`): a real
+-- `<img>` + CSS `transform` is enough, no need to preload/cache a
+-- `CanvasImageSource` the way the main canvas draw does — the browser
+-- handles fetching/caching `<img src>` itself.
+tileImageFor :: State -> Maybe Int -> Maybe (Tuple String String)
+tileImageFor st mv = do
+  v      <- mv
+  tileOf <- st.tilesetTileOf
+  dir    <- st.xmlTilesetDir
+  def    <- st.customTileSet
+  ref    <- tileOf v
+  let t         = orientationTransform ref.orientation
+      src       = tileImageSrc dir def.unique ref
+      transform = "rotate(" <> show t.rotationDeg <> "deg)" <> (if t.mirrored then " scaleX(-1)" else "")
+  pure (Tuple src transform)
+
+-- ---------------------------------------------------------------------------
 -- Canvas drawing
 -- ---------------------------------------------------------------------------
+
+-- Everything needed to draw a collapsed cell as its real tile picture
+-- instead of a flat color — each already-collapsed cell draws as its tile
+-- image as soon as one is available in `tilesetImageCache`, live during a
+-- run too; still-uncollapsed cells and any cache miss fall back to flat
+-- colors, so this never blocks on a not-yet-loaded image.
+type ImageDrawMode = { tileOf :: Int -> Maybe WP.TileRef, dir :: String, unique :: Boolean }
+
+imageDrawMode :: State -> Maybe ImageDrawMode
+imageDrawMode st =
+  case Tuple st.tilesetTileOf (Tuple st.xmlTilesetDir st.customTileSet) of
+    Tuple (Just tileOf) (Tuple (Just dir) (Just def)) -> Just { tileOf, dir, unique: def.unique }
+    _ -> Nothing
+
+-- Draw one tile image into a cell's square, rotated/mirrored per its
+-- orientation — `orientationTransform` (see above) already reduces any
+-- symmetry class down to "rotate N*90°, optionally mirrored first".
+drawTileImage :: Canvas.Context2D -> Canvas.CanvasImageSource -> Number -> Number -> Number -> Number -> Int -> Effect Unit
+drawTileImage ctx img x y w h orientation = do
+  let t = orientationTransform orientation
+  Canvas.save ctx
+  Canvas.translate ctx { translateX: x + w / 2.0, translateY: y + h / 2.0 }
+  when t.mirrored (Canvas.scale ctx { scaleX: -1.0, scaleY: 1.0 })
+  Canvas.rotate ctx (Int.toNumber t.rotationDeg * pi / 180.0)
+  Canvas.drawImageScale ctx img (-(w / 2.0)) (-(h / 2.0)) w h
+  Canvas.restore ctx
 
 drawCanvasEffect :: State -> Effect Unit
 drawCanvasEffect st = do
@@ -402,6 +504,7 @@ drawCanvasEffect st = do
             let cellW = cw / Int.toNumber width
                 cellH = ch / Int.toNumber height
                 sampleDef = currentSample st
+                mImg = imageDrawMode st
                 cells = Array.concat
                   (Array.mapWithIndex
                     (\y row -> Array.mapWithIndex (\x cell -> Tuple (Tuple x y) cell) row)
@@ -409,19 +512,29 @@ drawCanvasEffect st = do
             Canvas.setFont ctx (show (Int.floor (min cellW cellH * 0.7)) <> "px sans-serif")
             Canvas.setTextAlign ctx Canvas.AlignCenter
             for_ cells \(Tuple (Tuple x y) cell) -> do
-              let color = WP.cellColor sampleDef.palette cell
-                  px    = Int.toNumber x * cellW
-                  py    = Int.toNumber y * cellH
-              Canvas.setFillStyle ctx color
-              Canvas.fillRect ctx
-                { x:      px
-                , y:      py
-                , width:  cellW - 0.5
-                , height: cellH - 0.5
-                }
-              when cell.contradiction do
-                Canvas.setFillStyle ctx "#ffffff"
-                Canvas.fillText ctx "?" (px + cellW / 2.0) (py + cellH * 0.72)
+              let px = Int.toNumber x * cellW
+                  py = Int.toNumber y * cellH
+                  tileImage = do
+                    im  <- mImg
+                    guard (cell.collapsed && not cell.contradiction)
+                    ref <- Array.head cell.values >>= im.tileOf
+                    img <- Map.lookup (tileImageSrc im.dir im.unique ref) st.tilesetImageCache
+                    pure (Tuple img ref.orientation)
+              case tileImage of
+                Just (Tuple img orientation) ->
+                  drawTileImage ctx img px py cellW cellH orientation
+                Nothing -> do
+                  let color = WP.cellColor sampleDef.palette cell
+                  Canvas.setFillStyle ctx color
+                  Canvas.fillRect ctx
+                    { x:      px
+                    , y:      py
+                    , width:  cellW - 0.5
+                    , height: cellH - 0.5
+                    }
+                  when cell.contradiction do
+                    Canvas.setFillStyle ctx "#ffffff"
+                    Canvas.fillText ctx "?" (px + cellW / 2.0) (py + cellH * 0.72)
 
 drawCanvas :: H.HalogenM State Action Slots Void Aff Unit
 drawCanvas = do
@@ -487,7 +600,10 @@ applySampleDefaults = do
 startRun :: String -> H.HalogenM State Action Slots Void Aff Unit
 startRun mode = do
   st <- H.get
-  H.modify_ _ { running = true, status = Stepped, viewedStep = Nothing }
+  H.modify_ _
+    { running = true, status = Stepped, viewedStep = Nothing
+    , untilSolvedRunning = mode == "untilSolved"
+    }
   sendToWorkerEnsuring (runCommand st mode)
 
 -- ---------------------------------------------------------------------------
@@ -767,7 +883,11 @@ renderRunControls st =
         [ HH.text (if st.stepBackedOut then "⟲ Step" else "▶ Step") ]
     , HH.button
         [ HE.onClick \_ -> ResetWave
-        , HP.disabled (noStepsTaken || st.running)
+        -- Stays clickable through a whole "Run until solved" (it's safe —
+        -- ResetWave tells the worker to discard its session either way,
+        -- which also cancels an in-flight run); "Run once"/Step still
+        -- disable it while running, same as before.
+        , HP.disabled (noStepsTaken || (st.running && not st.untilSolvedRunning))
         ]
         [ HH.text "■ Reset" ]
     , HH.button
@@ -783,8 +903,9 @@ renderRunControls st =
     , HH.button
         [ HE.onClick \_ -> Stop
         , HP.disabled (not st.running)
+        , HP.title "Pause — the current solving session stays alive; Step/Run resume it"
         ]
-        [ HH.text "■ Stop" ]
+        [ HH.text "⏸ Pause" ]
     , HH.label
         [ HP.class_ (H.ClassName "toggle-row") ]
         [ HH.input
@@ -828,7 +949,7 @@ renderStats st =
         Stepped       -> "Stepping..."
         Done          -> "Done"
         Contradiction -> "Contradiction!"
-        Stopped       -> "Stopped"
+        Stopped       -> "Paused"
   in
   HH.div
     [ HP.class_ (H.ClassName "stats") ]
@@ -948,23 +1069,33 @@ renderPatThumb
   -> Tuple PatternId (Pattern Int)
   -> H.ComponentHTML Action Slots Aff
 renderPatThumb st cat (Tuple pid (Pattern px)) =
-  let n       = cat.size
-      sample  = currentSample st
-      cells   = Array.mapWithIndex (\_ v ->
-        HH.div
-          [ HP.class_ (H.ClassName "mini-cell")
-          , HP.style ("background:" <> sample.palette v)
-          ]
-          []
-        ) px
-  in
   HH.div
     [ HP.class_ (H.ClassName "pattern-thumb") ]
-    [ HH.div
-        [ HP.class_ (H.ClassName "pattern-grid")
-        , HP.style ("grid-template-columns: repeat(" <> show n <> ", 1fr);")
-        ]
-        cells
+    [ case tileImageFor st (Array.head px) of
+        Just (Tuple src transform) ->
+          HH.div
+            [ HP.class_ (H.ClassName "pattern-grid") ]
+            [ HH.img
+                [ HP.src src
+                , HP.style ("width:100%;height:100%;image-rendering:pixelated;transform:" <> transform <> ";")
+                ]
+            ]
+        Nothing ->
+          let n      = cat.size
+              sample = currentSample st
+              cells  = Array.mapWithIndex (\_ v ->
+                HH.div
+                  [ HP.class_ (H.ClassName "mini-cell")
+                  , HP.style ("background:" <> sample.palette v)
+                  ]
+                  []
+                ) px
+          in
+          HH.div
+            [ HP.class_ (H.ClassName "pattern-grid")
+            , HP.style ("grid-template-columns: repeat(" <> show n <> ", 1fr);")
+            ]
+            cells
     , renderSymmetryBadges cat pid
     , HH.div
         [ HP.class_ (H.ClassName "pat-label") ]
@@ -1092,6 +1223,7 @@ handleAction = case _ of
         case Array.index xmlTileSamples (idx - xmlTilesetOffset) of
           Nothing  -> applySampleDefaults
           Just def -> do
+            H.modify_ _ { xmlTilesetDir = Just def.tileDir }
             result <- H.liftAff (Fetch.fetchText def.xmlPath)
             case result of
               Left err -> H.modify_ _ { uploadError = Just err }
@@ -1128,24 +1260,26 @@ handleAction = case _ of
   ExtractPatterns -> do
     st <- H.get
     sendToWorker resetSessionCommand
-    let Tuple (Tuple cat rules) palette =
+    let built =
           case sourceKindOf st of
             SrcHandTiled ->
               let ts = currentTileSample st
-              in Tuple (Tuple (buildTiledCatalog ts.tiles) (buildTiledRules ts.tiles)) Nothing
+              in { cat: buildTiledCatalog ts.tiles, rules: buildTiledRules ts.tiles, palette: Nothing, tileOf: Nothing }
             SrcXmlTileset ->
               -- `st.customTileSet` should already be loaded by the time
               -- Extract is reachable (the button/its highlight don't wait
               -- on the fetch), but fall back to an empty tileset rather
               -- than crash if it's clicked mid-load.
               let def = fromMaybe { unique: false, tiles: [], neighbors: [], subsets: [] } st.customTileSet
-                  built = WP.buildIntCatalogFromTileSet def
-              in Tuple (Tuple built.catalog built.rules) (Just built.palette)
+                  b   = WP.buildIntCatalogFromTileSet def
+              in { cat: b.catalog, rules: b.rules, palette: Just b.palette, tileOf: Just b.tileOf }
             _ ->
               let sample = currentSampleDef st
                   c      = extractPatterns st.patternSize st.inputPeriodic st.useRotations st.useMirror sample.grid
-              in Tuple (Tuple c (buildRules c)) Nothing
-        wave = initWave cat rules { width: st.outW, height: st.outH } st.outputPeriodic
+              in { cat: c, rules: buildRules c, palette: Nothing, tileOf: Nothing }
+        cat   = built.cat
+        rules = built.rules
+        wave  = initWave cat rules { width: st.outW, height: st.outH } st.outputPeriodic
     H.modify_ \s -> s
       { status      = Ready
       , catalog     = Just cat
@@ -1161,9 +1295,20 @@ handleAction = case _ of
           , inputPeriodic: st.inputPeriodic
           }
       , stepBackedOut  = false
-      , tilesetPalette = palette
+      , tilesetPalette = built.palette
+      , tilesetTileOf  = built.tileOf
       }
     drawCanvas
+    -- Preload the tileset's tile images in the background, if this is an
+    -- XML tileset — flat colors (the palette fallback) keep being used
+    -- until an image lands in the cache, and every redraw re-checks the
+    -- cache, so nothing else needs to react to this finishing.
+    case Tuple (sourceKindOf st) (Tuple st.customTileSet st.xmlTilesetDir) of
+      Tuple SrcXmlTileset (Tuple (Just def) (Just dir)) -> do
+        cache <- H.liftAff (loadAllTilesetImages dir def)
+        H.modify_ _ { tilesetImageCache = cache }
+        drawCanvas
+      _ -> pure unit
 
   -- Single step, driven through the worker's persistent session (same one
   -- Run once/Run until solved/Stop share) so it continues from wherever
@@ -1199,7 +1344,7 @@ handleAction = case _ of
 
   Stop -> do
     sendToWorker stopCommand
-    H.modify_ _ { running = false, status = Stopped }
+    H.modify_ _ { running = false, untilSolvedRunning = false, status = Stopped }
 
   WorkerMsg ev -> do
     st <- H.get
@@ -1217,7 +1362,14 @@ handleAction = case _ of
       H.modify_ \s -> s
         { progressLog = Array.snoc s.progressLog msg
         , displayGrid = Just msg.grid
-        , running     = msg.continuous && msg.kind == "progress"
+        -- A "contradiction" in "Run until solved" always auto-restarts
+        -- (the worker sets `restarted` on that very message when it will),
+        -- so it's still "running" through it — only a genuinely terminal
+        -- outcome ("done", or a "Run once" contradiction, which never
+        -- restarts) actually stops. Without this, Stop/Reset/Step/etc.
+        -- would flicker enabled/disabled on every restart cycle.
+        , running     = msg.continuous && (msg.kind == "progress" || (msg.kind == "contradiction" && msg.restarted))
+        , untilSolvedRunning = s.untilSolvedRunning && msg.kind /= "done"
         , status      = case msg.kind of
             "done"          -> Done
             "contradiction" -> Contradiction

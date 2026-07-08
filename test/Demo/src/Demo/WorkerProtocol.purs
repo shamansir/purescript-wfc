@@ -104,34 +104,44 @@ fromWireTileSet w =
   , subsets: w.subsets
   }
 
+-- Just the two `TileInstance` fields a renderer needs (which base tile,
+-- which of its own orientations) — a plain record so it stays IsSendable
+-- and doesn't require importing `WFC.TileSet`'s newtype everywhere.
+type TileRef = { name :: String, orientation :: Int }
+
 -- `WFC.TileSet.buildTileSet` produces a `PatternCatalog TileInstance` (each
 -- pattern's one pixel is which oriented tile it is) — the rest of the demo
 -- (canvas/table/pattern-thumb rendering, `CellSnapshot.values :: Array
 -- Int`) is built around `PatternCatalog Int`, so this remaps each pattern
--- to a plain `Int` id (its own `PatternId`'s number — stable, unique) and
+-- to a plain `Int` id (its own `PatternId`'s number — stable, unique),
 -- derives an `Int -> String` palette by cycling a hue per distinct tile
--- name (orientation doesn't affect color; there's no real tile-image
--- rendering yet, see `WFC.TileSet`'s doc comment on `TileInstance`).
+-- name (used as a fallback before a tile's image has loaded, or if it
+-- fails to), and exposes `tileOf :: Int -> Maybe TileRef` so a renderer
+-- that *does* want the real picture (`Demo.App`'s pattern thumbnails/
+-- canvas) can look up which tile+orientation a given `Int` stands for.
 buildIntCatalogFromTileSet
   :: TileSetDef
-  -> { catalog :: PatternCatalog Int, rules :: AdjacencyRules, palette :: Int -> String }
+  -> { catalog :: PatternCatalog Int, rules :: AdjacencyRules, palette :: Int -> String, tileOf :: Int -> Maybe TileRef }
 buildIntCatalogFromTileSet def =
   let
     built = buildTileSet def
     entries = Map.toUnfoldable built.catalog.patterns :: Array (Tuple PatternId (Pattern TileInstance))
-    nameOf (TileInstance t) = t.name
     intOf (PatternId i) = i
     newPatterns = Map.fromFoldable (map (\(Tuple pid _) -> Tuple pid (Pattern [ intOf pid ])) entries)
     catalog = built.catalog { patterns = newPatterns }
-    namesByInt :: Map Int String
-    namesByInt = Map.fromFoldable
-      (map (\(Tuple pid (Pattern px)) -> Tuple (intOf pid) (fromMaybe "?" (nameOf <$> Array.head px))) entries)
-    distinctNames = Array.nub (Array.fromFoldable namesByInt)
+    refsByInt :: Map Int TileRef
+    refsByInt = Map.fromFoldable
+      (Array.mapMaybe
+        (\(Tuple pid (Pattern px)) -> Tuple (intOf pid) <$> (toRef <$> Array.head px))
+        entries)
+    toRef (TileInstance t) = { name: t.name, orientation: t.orientation }
+    tileOf i = Map.lookup i refsByInt
+    distinctNames = Array.nub (map _.name (Array.fromFoldable refsByInt))
     hueColor i = "hsl(" <> show ((i * 137) `mod` 360) <> ", 60%, 55%)"
     colorOfName name = fromMaybe "#888888" (hueColor <$> Array.elemIndex name distinctNames)
-    palette i = colorOfName (fromMaybe "" (Map.lookup i namesByInt))
+    palette i = colorOfName (fromMaybe "" (_.name <$> tileOf i))
   in
-    { catalog, rules: built.rules, palette }
+    { catalog, rules: built.rules, palette, tileOf }
 
 -- main -> worker
 type Command =

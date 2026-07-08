@@ -10,15 +10,16 @@ module Demo.XmlTileSamples where
 type XmlTileSampleDef =
   { name    :: String -- always suffixed " (Tileset)" to mark it as this kind of sample in the dropdown
   , xmlPath :: String -- relative to test/Demo/index.html
+  , tileDir :: String -- directory holding this set's per-tile PNGs, same base name as xmlPath
   }
 
 xmlTileSamples :: Array XmlTileSampleDef
 xmlTileSamples =
-  [ { name: "Castle (Tileset)", xmlPath: "tilesets/Castle.xml" }
-  , { name: "Circles (Tileset)", xmlPath: "tilesets/Circles.xml" }
-  , { name: "Circuit (Tileset)", xmlPath: "tilesets/Circuit.xml" }
-  , { name: "FloorPlan (Tileset)", xmlPath: "tilesets/FloorPlan.xml" }
-  , { name: "Knots (Tileset)", xmlPath: "tilesets/Knots.xml" }
-  , { name: "Rooms (Tileset)", xmlPath: "tilesets/Rooms.xml" }
-  , { name: "Summer (Tileset)", xmlPath: "tilesets/Summer.xml" }
+  [ { name: "Castle (Tileset)", xmlPath: "tilesets/Castle.xml", tileDir: "tilesets/Castle" }
+  , { name: "Circles (Tileset)", xmlPath: "tilesets/Circles.xml", tileDir: "tilesets/Circles" }
+  , { name: "Circuit (Tileset)", xmlPath: "tilesets/Circuit.xml", tileDir: "tilesets/Circuit" }
+  , { name: "FloorPlan (Tileset)", xmlPath: "tilesets/FloorPlan.xml", tileDir: "tilesets/FloorPlan" }
+  , { name: "Knots (Tileset)", xmlPath: "tilesets/Knots.xml", tileDir: "tilesets/Knots" }
+  , { name: "Rooms (Tileset)", xmlPath: "tilesets/Rooms.xml", tileDir: "tilesets/Rooms" }
+  , { name: "Summer (Tileset)", xmlPath: "tilesets/Summer.xml", tileDir: "tilesets/Summer" }
   ]
