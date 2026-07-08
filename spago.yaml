@@ -36,6 +36,9 @@ package:
       - unsafe-coerce
       - refs
       - foreign
+      - web-file
+      - web-events
+      - strings
 workspace:
   packageSet:
     registry: 77.10.0

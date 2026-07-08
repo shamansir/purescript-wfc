@@ -8,7 +8,7 @@ import Data.Either (Either(..))
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Time.Duration (Milliseconds(..))
 import Demo.Samples (checkerboard, samples)
-import Demo.WorkerProtocol (Command, emptyProgress, markContradiction, solvedCount, totalCellCount, waveToSnapshot)
+import Demo.WorkerProtocol (Command, customSampleDef, emptyProgress, markContradiction, solvedCount, totalCellCount, waveToSnapshot)
 import Effect (Effect)
 import Effect.Aff (Aff, delay, launchAff_)
 import Effect.Class (liftEffect)
@@ -47,7 +47,9 @@ handleMessage tokenRef ev = do
     "stop" -> void (Ref.modify (_ + 1) tokenRef)
     "run"  -> do
       myToken <- Ref.modify (_ + 1) tokenRef
-      let sample = fromMaybe checkerboard (Array.index samples cmd.sampleIdx)
+      let sample = if cmd.sampleIdx == -1
+                     then customSampleDef cmd.custom
+                     else fromMaybe checkerboard (Array.index samples cmd.sampleIdx)
           cat    = extractPatterns sample.n sample.periodic 1 sample.grid
           rules  = buildRules cat
           wave0  = initWave cat rules { width: sample.outW, height: sample.outH } sample.periodic

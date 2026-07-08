@@ -22,3 +22,6 @@ package:
     - unsafe-coerce
     - refs
     - foreign
+    - web-file
+    - web-events
+    - strings

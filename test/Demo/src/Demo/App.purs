@@ -22,6 +22,7 @@ import Halogen.HTML.Properties as HP
 import Halogen.Subscription as HS
 import Unsafe.Coerce (unsafeCoerce)
 
+import Demo.ImageUpload as ImageUpload
 import Demo.Samples (SampleDef, samples)
 import Demo.WorkerProtocol (Grid, CellSnapshot)
 import Demo.WorkerProtocol as WP
@@ -32,6 +33,9 @@ import WFC.Pattern (Pattern(..), PatternId)
 import WFC.Propagate (Contradiction(..)) as Propagate
 import WFC.Rules (AdjacencyRules, buildRules)
 import WFC.Wave (Wave, initWave)
+import Web.Event.Event as Event
+import Web.File.FileList as FileList
+import Web.HTML.HTMLInputElement as HTMLInputElement
 import Web.Worker.MessageEvent (MessageEvent)
 import Web.Worker.MessageEvent as MessageEvent
 import Web.Worker.Worker (Worker)
@@ -61,12 +65,15 @@ type State =
   , stopRequested :: Boolean
   , displayGrid   :: Maybe Grid
   , progressLog   :: Array WP.Progress
+  , customImage   :: Maybe WP.CustomImage
+  , uploadError   :: Maybe String
   }
 
 data Action
   = Init
   | Finalize
   | SelectSample Int
+  | UploadImage Event.Event
   | ExtractPatterns
   | StepOnce
   | ResetWave
@@ -100,6 +107,8 @@ initialState =
   , stopRequested: false
   , displayGrid:   Nothing
   , progressLog:   []
+  , customImage:   Nothing
+  , uploadError:   Nothing
   }
 
 -- ---------------------------------------------------------------------------
@@ -117,8 +126,9 @@ fmtMs ms =
   show (Int.toNumber (Int.floor (ms * 10.0)) / 10.0) <> "ms"
 
 currentSample :: State -> SampleDef
-currentSample st =
-  fromMaybe (unsafeHead samples) (Array.index samples st.sampleIdx)
+currentSample st = case st.customImage of
+  Just ci -> WP.customSampleDef ci
+  Nothing -> fromMaybe (unsafeHead samples) (Array.index samples st.sampleIdx)
 
 unsafeHead :: forall a. Array a -> a
 unsafeHead arr = case Array.head arr of
@@ -126,10 +136,47 @@ unsafeHead arr = case Array.head arr of
   Nothing -> unsafeHead arr  -- should never happen for non-empty arrays
 
 stopCommand :: WP.Command
-stopCommand = { kind: "stop", sampleIdx: 0, mode: "" }
+stopCommand = { kind: "stop", sampleIdx: 0, mode: "", custom: WP.emptyCustomImage }
 
-runCommand :: Int -> String -> WP.Command
-runCommand sampleIdx mode = { kind: "run", sampleIdx, mode }
+runCommand :: State -> String -> WP.Command
+runCommand st mode = case st.customImage of
+  Just ci -> { kind: "run", sampleIdx: -1, mode, custom: ci }
+  Nothing -> { kind: "run", sampleIdx: st.sampleIdx, mode, custom: WP.emptyCustomImage }
+
+-- Fields shared by "switch to a different sample" (built-in or uploaded):
+-- drop whatever local wave/run/progress state referred to the old sample.
+resetRunState :: State -> State
+resetRunState s = s
+  { status        = Idle
+  , catalog       = Nothing
+  , rules         = Nothing
+  , wave          = Nothing
+  , initWave_     = Nothing
+  , stepCount     = 0
+  , stepTimes     = []
+  , totalTime     = 0.0
+  , running       = false
+  , stopRequested = true
+  , displayGrid   = Nothing
+  , progressLog   = []
+  }
+
+-- Reasonable defaults for a freshly-decoded upload: N=3 when the image is at
+-- least 3px on both axes (falling back to 2 or 1 for tinier uploads),
+-- non-periodic, output scaled up 3x within a sane runtime-cost range.
+clampInt :: Int -> Int -> Int -> Int
+clampInt lo hi n = max lo (min hi n)
+
+customImageFrom :: ImageUpload.LoadedImage -> WP.CustomImage
+customImageFrom loaded =
+  { grid: loaded.grid
+  , colors: loaded.colors
+  , n: clampInt 1 3 (min loaded.width loaded.height)
+  , periodic: false
+  , outW: clampInt 16 64 (loaded.width * 3)
+  , outH: clampInt 16 64 (loaded.height * 3)
+  , name: loaded.name
+  }
 
 -- ---------------------------------------------------------------------------
 -- Canvas drawing
@@ -212,7 +259,7 @@ startRun mode = do
     , progressLog   = []
     , displayGrid   = Nothing
     }
-  H.liftEffect $ Worker.postMessage (runCommand st.sampleIdx mode) w
+  H.liftEffect $ Worker.postMessage (runCommand st mode) w
 
 -- ---------------------------------------------------------------------------
 -- Component
@@ -247,10 +294,38 @@ renderSidebar st =
     [ HH.select
         [ HE.onSelectedIndexChange SelectSample ]
         (Array.mapWithIndex renderOption samples)
+    , renderUpload st
     , renderButtons st
     , renderStats st
     , renderProgress st
     , renderPatterns st
+    ]
+
+-- File upload: pick a small (<=32x32) image to use as the pattern source
+-- instead of a built-in sample. `currentSample` prefers `customImage` when
+-- set, so nothing else in the app needs to know whether the active sample
+-- came from here or from the dropdown.
+renderUpload :: State -> H.ComponentHTML Action Slots Aff
+renderUpload st =
+  HH.div
+    [ HP.class_ (H.ClassName "upload") ]
+    [ HH.label
+        [ HP.class_ (H.ClassName "upload-label") ]
+        [ HH.text "Or upload image (max 32×32): " ]
+    , HH.input
+        [ HP.type_ HP.InputFile
+        , HP.attr (H.AttrName "accept") "image/*"
+        , HE.onChange UploadImage
+        ]
+    , case st.customImage of
+        Just ci -> HH.div [ HP.class_ (H.ClassName "upload-status") ]
+          [ HH.text ("Active: " <> ci.name <> " ("
+              <> show (fromMaybe 0 (map Array.length (Array.head ci.grid))) <> "×"
+              <> show (Array.length ci.grid) <> ")") ]
+        Nothing -> HH.text ""
+    , case st.uploadError of
+        Just err -> HH.div [ HP.class_ (H.ClassName "upload-error") ] [ HH.text err ]
+        Nothing  -> HH.text ""
     ]
 
 renderOption :: Int -> SampleDef -> H.ComponentHTML Action Slots Aff
@@ -421,6 +496,12 @@ renderMain st =
         , HP.width 320
         , HP.height 320
         ]
+    , HH.canvas
+        [ HP.id "upload-canvas"
+        , HP.width 32
+        , HP.height 32
+        , HP.style "display:none;"
+        ]
     , renderMatrix st
     ]
 
@@ -478,23 +559,33 @@ handleAction = case _ of
   SelectSample idx -> do
     st <- H.get
     for_ st.worker (H.liftEffect <<< Worker.postMessage stopCommand)
-    H.modify_ \s ->
-      { sampleIdx:   idx
-      , status:      Idle
-      , catalog:     (Nothing :: Maybe (PatternCatalog Int))
-      , rules:       (Nothing :: Maybe AdjacencyRules)
-      , wave:        (Nothing :: Maybe (Wave Int))
-      , initWave_:   (Nothing :: Maybe (Wave Int))
-      , stepCount:   0
-      , stepTimes:   ([] :: Array Number)
-      , totalTime:   0.0
-      , showPats:      s.showPats
-      , worker:        s.worker
-      , running:       false
-      , stopRequested: true
-      , displayGrid:   Nothing
-      , progressLog:   ([] :: Array WP.Progress)
+    H.modify_ \s -> (resetRunState s)
+      { sampleIdx   = idx
+      , customImage = Nothing
+      , uploadError = Nothing
       }
+    drawCanvas
+
+  UploadImage ev -> do
+    let mInputEl = Event.target ev >>= HTMLInputElement.fromEventTarget
+    case mInputEl of
+      Nothing -> pure unit
+      Just inputEl -> do
+        mFiles <- H.liftEffect (HTMLInputElement.files inputEl)
+        case mFiles >>= FileList.item 0 of
+          Nothing -> pure unit
+          Just file -> do
+            st <- H.get
+            for_ st.worker (H.liftEffect <<< Worker.postMessage stopCommand)
+            result <- H.liftAff (ImageUpload.loadImageAsSample 32 file)
+            case result of
+              Left err ->
+                H.modify_ _ { uploadError = Just err }
+              Right loaded ->
+                H.modify_ \s -> (resetRunState s)
+                  { customImage = Just (customImageFrom loaded)
+                  , uploadError = Nothing
+                  }
     drawCanvas
 
   ExtractPatterns -> do

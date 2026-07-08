@@ -21,8 +21,11 @@
             "ordered-collections",
             "prelude",
             "refs",
+            "strings",
             "tuples",
             "unsafe-coerce",
+            "web-events",
+            "web-file",
             "web-html",
             "web-workers",
             "wfc"
@@ -69,7 +72,10 @@
             "refs",
             "spec",
             "spec-node",
+            "strings",
             "unsafe-coerce",
+            "web-events",
+            "web-file",
             "web-html",
             "web-workers"
           ]

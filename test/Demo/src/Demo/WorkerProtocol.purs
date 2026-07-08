@@ -4,7 +4,7 @@ import Prelude
 
 import Data.Array as Array
 import Data.Foldable (foldl)
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set as Set
 import Demo.Samples (SampleDef)
 import WFC.Catalog (PatternCatalog)
@@ -23,11 +23,44 @@ type CellSnapshot =
 
 type Grid = Array (Array CellSnapshot)
 
+-- Plain-data twin of `SampleDef` — `SampleDef.palette :: Int -> String` is a
+-- function and can't cross postMessage, so an uploaded/custom sample is sent
+-- as a flat color table instead, and both sides rebuild a `SampleDef` from it
+-- via `customSampleDef`.
+type CustomImage =
+  { grid     :: Array (Array Int)
+  , colors   :: Array String
+  , n        :: Int
+  , periodic :: Boolean
+  , outW     :: Int
+  , outH     :: Int
+  , name     :: String
+  }
+
+emptyCustomImage :: CustomImage
+emptyCustomImage =
+  { grid: [], colors: [], n: 1, periodic: false, outW: 1, outH: 1, name: "" }
+
+paletteFromColors :: Array String -> Int -> String
+paletteFromColors colors v = fromMaybe "#888888" (Array.index colors v)
+
+customSampleDef :: CustomImage -> SampleDef
+customSampleDef ci =
+  { name: ci.name
+  , grid: ci.grid
+  , palette: paletteFromColors ci.colors
+  , n: ci.n
+  , periodic: ci.periodic
+  , outW: ci.outW
+  , outH: ci.outH
+  }
+
 -- main -> worker
 type Command =
   { kind      :: String -- "run" | "stop"
-  , sampleIdx :: Int     -- ignored for "stop"
+  , sampleIdx :: Int     -- ignored for "stop"; -1 means "use `custom` below"
   , mode      :: String -- "once" | "untilSolved"
+  , custom    :: CustomImage -- ignored unless sampleIdx == -1
   }
 
 -- worker -> main
