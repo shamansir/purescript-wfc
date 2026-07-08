@@ -63,6 +63,9 @@ type Command =
   , custom          :: CustomImage -- ignored unless sampleIdx == -1 and not tiledMode
   , useBacktracking :: Boolean -- undo just the last guess instead of a full restart
   , tiledMode       :: Boolean -- hand-authored tiles (WFC.Tiles) instead of the overlapping model
+  , patternSize     :: Int     -- overlapping model only (N×N patterns); ignored when tiledMode
+  , outW            :: Int     -- result grid width, overrides the sample's own default
+  , outH            :: Int     -- result grid height, overrides the sample's own default
   }
 
 -- worker -> main

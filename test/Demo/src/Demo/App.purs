@@ -23,7 +23,7 @@ import Halogen.Subscription as HS
 import Unsafe.Coerce (unsafeCoerce)
 
 import Demo.ImageUpload as ImageUpload
-import Demo.Samples (SampleDef, samples)
+import Demo.Samples (SampleDef, checkerboard, samples)
 import Demo.TileSamples (TileSampleDef)
 import Demo.TileSamples as TileSamples
 import Demo.WorkerProtocol (Grid, CellSnapshot)
@@ -73,6 +73,9 @@ type State =
   , useBacktracking :: Boolean
   , tiledMode       :: Boolean
   , viewedStep      :: Maybe Int
+  , patternSize     :: Int -- overlapping model only; ignored (fixed at 1) in tiled mode
+  , outW            :: Int -- result grid width; defaults to the active sample's own outW
+  , outH            :: Int -- result grid height; defaults to the active sample's own outH
   }
 
 data Action
@@ -91,6 +94,9 @@ data Action
   | ToggleBacktracking
   | ToggleTiledMode
   | ViewStep Int
+  | SetPatternSize Int
+  | SetOutW Int
+  | SetOutH Int
 
 type Slots :: forall k. Row k
 type Slots = ()
@@ -121,6 +127,9 @@ initialState =
   , useBacktracking: false
   , tiledMode:       false
   , viewedStep:      Nothing
+  , patternSize:     checkerboard.n
+  , outW:            checkerboard.outW
+  , outH:            checkerboard.outH
   }
 
 -- ---------------------------------------------------------------------------
@@ -175,6 +184,15 @@ unsafeHead arr = case Array.head arr of
   Just x  -> x
   Nothing -> unsafeHead arr  -- should never happen for non-empty arrays
 
+-- The active sample's own N/output-size defaults — recomputed whenever the
+-- sample source changes (SelectSample/UploadImage/ToggleTiledMode) so the
+-- pattern-size/result-size controls start at a sensible value instead of
+-- carrying over the previous sample's numbers.
+sampleDefaults :: State -> { n :: Int, outW :: Int, outH :: Int }
+sampleDefaults st
+  | st.tiledMode = let ts = currentTileSample st in { n: 1, outW: ts.outW, outH: ts.outH }
+  | otherwise    = let s  = currentSampleDef st  in { n: s.n, outW: s.outW, outH: s.outH }
+
 -- What to actually render: the live latest grid, unless the user clicked a
 -- past progress-bar square to review it (`viewedStep`), in which case that
 -- step's own snapshot wins instead — a live-updating run keeps appending to
@@ -189,6 +207,7 @@ stopCommand :: WP.Command
 stopCommand =
   { kind: "stop", sampleIdx: 0, mode: "", custom: WP.emptyCustomImage
   , useBacktracking: false, tiledMode: false
+  , patternSize: 1, outW: 1, outH: 1
   }
 
 runCommand :: State -> String -> WP.Command
@@ -196,10 +215,12 @@ runCommand st mode = case st.customImage of
   Just ci | not st.tiledMode ->
     { kind: "run", sampleIdx: -1, mode, custom: ci
     , useBacktracking: st.useBacktracking, tiledMode: false
+    , patternSize: st.patternSize, outW: st.outW, outH: st.outH
     }
   _ ->
     { kind: "run", sampleIdx: st.sampleIdx, mode, custom: WP.emptyCustomImage
     , useBacktracking: st.useBacktracking, tiledMode: st.tiledMode
+    , patternSize: st.patternSize, outW: st.outW, outH: st.outH
     }
 
 -- Fields shared by "switch to a different sample" (built-in or uploaded):
@@ -308,6 +329,12 @@ ensureWorker = do
       H.modify_ _ { worker = Just w }
       pure w
 
+applySampleDefaults :: H.HalogenM State Action Slots Void Aff Unit
+applySampleDefaults = do
+  st <- H.get
+  let d = sampleDefaults st
+  H.modify_ _ { patternSize = d.n, outW = d.outW, outH = d.outH }
+
 startRun :: String -> H.HalogenM State Action Slots Void Aff Unit
 startRun mode = do
   st <- H.get
@@ -319,6 +346,9 @@ startRun mode = do
     , progressLog   = []
     , displayGrid   = Nothing
     , viewedStep    = Nothing
+    , stepCount     = 0
+    , stepTimes     = ([] :: Array Number)
+    , totalTime     = 0.0
     }
   H.liftEffect $ Worker.postMessage (runCommand st mode) w
 
@@ -365,6 +395,7 @@ renderSidebar st =
         (Array.mapWithIndex renderOption sampleNames)
     , renderModeToggle st
     , if st.tiledMode then HH.text "" else renderUpload st
+    , renderSizeControls st
     , renderSourcePreview st
     , renderSourceControls st
     , renderPatterns st
@@ -434,6 +465,57 @@ renderOption i name =
   HH.option
     [ HP.value (show i) ]
     [ HH.text name ]
+
+-- Pattern size (N×N, overlapping model only — tiles are always size 1) and
+-- result grid size, both editable before Extract; default to the active
+-- sample's own numbers (kept in sync by `sampleDefaults` whenever the
+-- source changes) rather than some fixed constant.
+renderSizeControls :: State -> H.ComponentHTML Action Slots Aff
+renderSizeControls st =
+  HH.div
+    [ HP.class_ (H.ClassName "size-controls") ]
+    ( ( if st.tiledMode then []
+        else
+          [ HH.label
+              [ HP.class_ (H.ClassName "size-label") ]
+              [ HH.text "Pattern size: "
+              , HH.select
+                  [ HE.onSelectedIndexChange (\i -> SetPatternSize (i + 1)) ]
+                  (map (renderSizeOption st.patternSize) [ 1, 2, 3, 4 ])
+              ]
+          ]
+      )
+      <>
+      [ HH.label
+          [ HP.class_ (H.ClassName "size-label") ]
+          [ HH.text "Result W: "
+          , HH.input
+              [ HP.type_ HP.InputNumber
+              , HP.value (show st.outW)
+              , HP.min 1.0
+              , HP.max 64.0
+              , HE.onValueChange (\v -> SetOutW (clampInt 1 64 (fromMaybe st.outW (Int.fromString v))))
+              ]
+          ]
+      , HH.label
+          [ HP.class_ (H.ClassName "size-label") ]
+          [ HH.text "Result H: "
+          , HH.input
+              [ HP.type_ HP.InputNumber
+              , HP.value (show st.outH)
+              , HP.min 1.0
+              , HP.max 64.0
+              , HE.onValueChange (\v -> SetOutH (clampInt 1 64 (fromMaybe st.outH (Int.fromString v))))
+              ]
+          ]
+      ]
+    )
+
+renderSizeOption :: Int -> Int -> H.ComponentHTML Action Slots Aff
+renderSizeOption current n =
+  HH.option
+    [ HP.value (show n), HP.selected (n == current) ]
+    [ HH.text (show n <> "×" <> show n) ]
 
 -- What Extract actually reads from: the raw source grid (built-in sample
 -- or uploaded image) for the overlapping model, or the raw tile set for
@@ -529,6 +611,13 @@ renderRunControls st =
         ]
     ]
 
+-- Per-iteration step counts — one number per history row (see
+-- `buildHistoryRows`): a full restart or, in backtracking mode, an
+-- individual backtrack pop both start a new row/iteration. Single-row runs
+-- collapse back to the plain total, same as `st.stepCount`.
+iterationStepCounts :: Array WP.Progress -> Array Int
+iterationStepCounts entries = map (\r -> Array.length r.cells) (buildHistoryRows entries)
+
 renderStats :: State -> H.ComponentHTML Action Slots Aff
 renderStats st =
   let catInfo = case st.catalog of
@@ -537,9 +626,14 @@ renderStats st =
           show (Map.size cat.patterns) <> " patterns, size "
           <> show cat.size <> "×" <> show cat.size
       lastMs = fromMaybe 0.0 (Array.last st.stepTimes)
+      segments = iterationStepCounts st.progressLog
+      stepsStr =
+        if st.useBacktracking && Array.length segments > 1
+          then Array.intercalate "|" (map show segments)
+          else show st.stepCount
       statsStr =
         catInfo
-        <> " | Steps: " <> show st.stepCount
+        <> " | Steps: " <> stepsStr
         <> " | Last: " <> fmtMs lastMs
         <> " | Total: " <> fmtMs st.totalTime
       statusStr = case st.status of
@@ -762,6 +856,7 @@ handleAction = case _ of
       , customImage = Nothing
       , uploadError = Nothing
       }
+    applySampleDefaults
     drawCanvas
 
   UploadImage ev -> do
@@ -779,11 +874,12 @@ handleAction = case _ of
             case result of
               Left err ->
                 H.modify_ _ { uploadError = Just err }
-              Right loaded ->
+              Right loaded -> do
                 H.modify_ \s -> (resetRunState s)
                   { customImage = Just (customImageFrom loaded)
                   , uploadError = Nothing
                   }
+                applySampleDefaults
     drawCanvas
 
   ExtractPatterns -> do
@@ -796,10 +892,10 @@ handleAction = case _ of
               in Tuple c (buildTiledRules ts.tiles)
             else
               let sample = currentSampleDef st
-                  c      = extractPatterns sample.n sample.periodic 1 sample.grid
+                  c      = extractPatterns st.patternSize sample.periodic 1 sample.grid
               in Tuple c (buildRules c)
         meta = currentSample st
-        wave = initWave cat rules { width: meta.outW, height: meta.outH } meta.periodic
+        wave = initWave cat rules { width: st.outW, height: st.outH } meta.periodic
     H.modify_ \s -> s
       { status      = Ready
       , catalog     = Just cat
@@ -905,6 +1001,10 @@ handleAction = case _ of
     -- for this run instead of letting a straggler flip `running` back on.
     unless st.stopRequested do
       let msg = unsafeCoerce (MessageEvent.data_ ev) :: WP.Progress
+      -- The worker reports `elapsedMs` as cumulative time since the run
+      -- started (it never resets `t0`, even across restarts), so the
+      -- per-step duration is the delta from the previous cumulative value,
+      -- not `msg.elapsedMs` itself.
       H.modify_ \s -> s
         { progressLog = Array.snoc s.progressLog msg
         , displayGrid = Just msg.grid
@@ -913,6 +1013,9 @@ handleAction = case _ of
             "done"          -> Done
             "contradiction" -> Contradiction
             _               -> s.status
+        , stepCount   = msg.step
+        , stepTimes   = Array.snoc s.stepTimes (msg.elapsedMs - s.totalTime)
+        , totalTime   = msg.elapsedMs
         }
       drawCanvas
 
@@ -931,8 +1034,18 @@ handleAction = case _ of
       , customImage = Nothing
       , uploadError = Nothing
       }
+    applySampleDefaults
     drawCanvas
 
   ViewStep i -> do
     H.modify_ _ { viewedStep = Just i }
     drawCanvas
+
+  SetPatternSize n ->
+    H.modify_ _ { patternSize = n }
+
+  SetOutW w ->
+    H.modify_ _ { outW = w }
+
+  SetOutH h ->
+    H.modify_ _ { outH = h }

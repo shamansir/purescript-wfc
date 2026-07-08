@@ -58,14 +58,14 @@ handleMessage tokenRef ev = do
             if cmd.tiledMode then
               let ts = fromMaybe roads (Array.index TileSamples.samples cmd.sampleIdx)
               in { cat: buildTiledCatalog ts.tiles, rules: buildTiledRules ts.tiles
-                 , outW: ts.outW, outH: ts.outH, periodic: ts.periodic
+                 , outW: cmd.outW, outH: cmd.outH, periodic: ts.periodic
                  }
             else
               let sample = if cmd.sampleIdx == -1
                              then customSampleDef cmd.custom
                              else fromMaybe checkerboard (Array.index samples cmd.sampleIdx)
-                  cat    = extractPatterns sample.n sample.periodic 1 sample.grid
-              in { cat, rules: buildRules cat, outW: sample.outW, outH: sample.outH, periodic: sample.periodic }
+                  cat    = extractPatterns cmd.patternSize sample.periodic 1 sample.grid
+              in { cat, rules: buildRules cat, outW: cmd.outW, outH: cmd.outH, periodic: sample.periodic }
           wave0 = initWave built.cat built.rules { width: built.outW, height: built.outH } built.periodic
       t0 <- now
       if cmd.useBacktracking
