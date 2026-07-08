@@ -3,14 +3,21 @@ module Demo.WorkerProtocol where
 import Prelude
 
 import Data.Array as Array
+import Data.Either (hush)
 import Data.Foldable (foldl)
+import Data.Map (Map)
+import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set as Set
+import Data.Tuple (Tuple(..))
 import Demo.Samples (SampleDef)
 import WFC.Catalog (PatternCatalog)
 import WFC.Grid (Pos(..))
-import WFC.Pattern (PatternId)
+import WFC.Pattern (Pattern(..), PatternId(..))
 import WFC.Render (topLeftPixel)
+import WFC.Rules (AdjacencyRules)
+import WFC.TileSet (NeighborRule, Subset, TileInstance(..), TileSetDef, buildTileSet)
+import WFC.TileSet.Symmetry (Symmetry(..), parseSymmetry)
 import WFC.Wave (Wave, getCellPossibilities)
 
 -- One cell's worker-reported state, plain enough to satisfy `IsSendable`
@@ -55,21 +62,93 @@ customSampleDef ci =
   , outH: ci.outH
   }
 
+-- Plain-data twin of `WFC.TileSet.TileDef` — `symmetry` travels as its
+-- `String` name instead of the `Symmetry` ADT, so the whole thing is
+-- IsSendable-safe (`WFC.TileSet.NeighborRule`/`Subset` are already plain
+-- records, no conversion needed there).
+type WireTileDef =
+  { name     :: String
+  , symmetry :: String
+  , weight   :: Number
+  }
+
+-- Plain-data twin of `WFC.TileSet.TileSetDef` — a parsed XML tileset, sent
+-- from the main thread (which fetches/parses the file) to the worker
+-- (which independently rebuilds the same catalog/rules from it), the same
+-- way an uploaded/built-in image crosses as a `CustomImage`.
+type CustomTileSet =
+  { unique    :: Boolean
+  , tiles     :: Array WireTileDef
+  , neighbors :: Array NeighborRule
+  , subsets   :: Array Subset
+  , name      :: String
+  }
+
+emptyCustomTileSet :: CustomTileSet
+emptyCustomTileSet = { unique: false, tiles: [], neighbors: [], subsets: [], name: "" }
+
+toWireTileSet :: String -> TileSetDef -> CustomTileSet
+toWireTileSet name def =
+  { unique: def.unique
+  , tiles: map (\t -> { name: t.name, symmetry: show t.symmetry, weight: t.weight }) def.tiles
+  , neighbors: def.neighbors
+  , subsets: def.subsets
+  , name
+  }
+
+fromWireTileSet :: CustomTileSet -> TileSetDef
+fromWireTileSet w =
+  { unique: w.unique
+  , tiles: map (\t -> { name: t.name, symmetry: fromMaybe SymX (hush (parseSymmetry t.symmetry)), weight: t.weight }) w.tiles
+  , neighbors: w.neighbors
+  , subsets: w.subsets
+  }
+
+-- `WFC.TileSet.buildTileSet` produces a `PatternCatalog TileInstance` (each
+-- pattern's one pixel is which oriented tile it is) — the rest of the demo
+-- (canvas/table/pattern-thumb rendering, `CellSnapshot.values :: Array
+-- Int`) is built around `PatternCatalog Int`, so this remaps each pattern
+-- to a plain `Int` id (its own `PatternId`'s number — stable, unique) and
+-- derives an `Int -> String` palette by cycling a hue per distinct tile
+-- name (orientation doesn't affect color; there's no real tile-image
+-- rendering yet, see `WFC.TileSet`'s doc comment on `TileInstance`).
+buildIntCatalogFromTileSet
+  :: TileSetDef
+  -> { catalog :: PatternCatalog Int, rules :: AdjacencyRules, palette :: Int -> String }
+buildIntCatalogFromTileSet def =
+  let
+    built = buildTileSet def
+    entries = Map.toUnfoldable built.catalog.patterns :: Array (Tuple PatternId (Pattern TileInstance))
+    nameOf (TileInstance t) = t.name
+    intOf (PatternId i) = i
+    newPatterns = Map.fromFoldable (map (\(Tuple pid _) -> Tuple pid (Pattern [ intOf pid ])) entries)
+    catalog = built.catalog { patterns = newPatterns }
+    namesByInt :: Map Int String
+    namesByInt = Map.fromFoldable
+      (map (\(Tuple pid (Pattern px)) -> Tuple (intOf pid) (fromMaybe "?" (nameOf <$> Array.head px))) entries)
+    distinctNames = Array.nub (Array.fromFoldable namesByInt)
+    hueColor i = "hsl(" <> show ((i * 137) `mod` 360) <> ", 60%, 55%)"
+    colorOfName name = fromMaybe "#888888" (hueColor <$> Array.elemIndex name distinctNames)
+    palette i = colorOfName (fromMaybe "" (Map.lookup i namesByInt))
+  in
+    { catalog, rules: built.rules, palette }
+
 -- main -> worker
 type Command =
   { kind            :: String -- "run" | "step" | "stop" | "resetSession"
-  , sampleIdx       :: Int     -- ignored for "stop"/"resetSession"; -1 means "use `custom` below"
+  , sourceKind      :: String -- "builtin" | "image" | "handTiled" | "xmlTileset" — which of the fields below is meaningful
+  , sampleIdx       :: Int     -- index into the relevant compiled-in list ("builtin"/"handTiled"); ignored otherwise
   , mode            :: String -- "once" | "untilSolved" for "run"; ignored (ever ""/single-shot) for "step"
-  , custom          :: CustomImage -- ignored unless sampleIdx == -1 and not tiledMode
+  , custom          :: CustomImage -- used when sourceKind == "image"
+  , customTileSet   :: CustomTileSet -- used when sourceKind == "xmlTileset"
   , useBacktracking :: Boolean -- undo just the last guess instead of a full restart
-  , tiledMode       :: Boolean -- hand-authored tiles (WFC.Tiles) instead of the overlapping model
-  , patternSize     :: Int     -- overlapping model only (N×N patterns); ignored when tiledMode
+  , patternSize     :: Int     -- overlapping model only (N×N patterns); ignored for tile-based sources
   , outW            :: Int     -- result grid width, overrides the sample's own default
   , outH            :: Int     -- result grid height, overrides the sample's own default
   , useRotations    :: Boolean -- overlapping model only; also extract 90°/180°/270° rotations
   , useMirror       :: Boolean -- overlapping model only; also extract the horizontal reflection
   , inputPeriodic   :: Boolean -- overlapping model only; wrap the source grid when extracting N×N windows
-  , outputPeriodic  :: Boolean -- wrap the output wave's own edges during solving (both models)
+  , outputPeriodic  :: Boolean -- wrap the output wave's own edges during solving (all sources)
   }
 
 -- worker -> main

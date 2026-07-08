@@ -7,7 +7,7 @@ import Data.Either (Either(..))
 import Data.Foldable (for_)
 import Data.Int as Int
 import Data.Map as Map
-import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Aff (Aff)
@@ -19,6 +19,7 @@ import Halogen.HTML.Properties as HP
 import Halogen.Subscription as HS
 import Unsafe.Coerce (unsafeCoerce)
 
+import Demo.Fetch as Fetch
 import Demo.ImageSamples (imageSamples)
 import Demo.ImageUpload as ImageUpload
 import Demo.Samples (SampleDef, checkerboard, samples)
@@ -26,10 +27,13 @@ import Demo.TileSamples (TileSampleDef)
 import Demo.TileSamples as TileSamples
 import Demo.WorkerProtocol (Grid, CellSnapshot)
 import Demo.WorkerProtocol as WP
+import Demo.XmlTileSamples (xmlTileSamples)
 import WFC.Catalog (PatternCatalog, extractPatterns)
 import WFC.Pattern (Pattern(..), PatternId)
 import WFC.Rules (buildRules)
 import WFC.Tiles (buildTiledCatalog, buildTiledRules)
+import WFC.TileSet.Xml (parseTileSetXml)
+import WFC.TileSet as TS
 import WFC.Wave (Wave, initWave)
 import Web.Event.Event as Event
 import Web.File.FileList as FileList
@@ -64,18 +68,27 @@ type State =
   , customImage   :: Maybe WP.CustomImage
   , uploadError   :: Maybe String
   , useBacktracking :: Boolean
-  , tiledMode       :: Boolean
   , viewedStep      :: Maybe Int
-  , patternSize     :: Int -- overlapping model only; ignored (fixed at 1) in tiled mode
+  , patternSize     :: Int -- overlapping model only; ignored (fixed at 1) for tile-based sources
   , outW            :: Int -- result grid width; defaults to the active sample's own outW
   , outH            :: Int -- result grid height; defaults to the active sample's own outH
   , useRotations    :: Boolean -- overlapping model only; also extract 90/180/270 rotations
   , useMirror       :: Boolean -- overlapping model only; also extract the horizontal reflection
   , inputPeriodic   :: Boolean -- overlapping model only; wrap the source grid when extracting N×N windows
-  , outputPeriodic  :: Boolean -- wrap the output wave's own edges during solving (both models)
+  , outputPeriodic  :: Boolean -- wrap the output wave's own edges during solving (all sources)
   , extractedWith   :: Maybe ExtractSettings -- settings `catalog` was actually extracted with
   , stepBackedOut   :: Boolean -- the last manual Step performed a backtrack pop (WFC.Backtrack.BackedOut)
+  , customTileSet   :: Maybe TS.TileSetDef -- fetched+parsed XML tileset, for SrcXmlTileset (mirrors customImage)
+  , tilesetPalette  :: Maybe (Int -> String) -- built alongside `catalog` at Extract time, for SrcXmlTileset only
   }
+
+-- Which of the demo's 4 sample sources is currently selected, derived
+-- purely from `sampleIdx`'s position across the 4 concatenated lists that
+-- make up the single flat dropdown (`renderSidebar`'s `sampleNames`) — see
+-- `sourceKindOf`/the offset helpers just below it.
+data SourceKind = SrcBuiltin | SrcImage | SrcHandTiled | SrcXmlTileset
+
+derive instance eqSourceKind :: Eq SourceKind
 
 -- Just the settings that affect what `ExtractPatterns` produces — captured
 -- at extraction time so a later change to any of them (before the next
@@ -103,7 +116,6 @@ data Action
   | WorkerMsg MessageEvent
   | TogglePatterns
   | ToggleBacktracking
-  | ToggleTiledMode
   | ViewStep Int
   | SetPatternSize Int
   | SetOutW Int
@@ -138,7 +150,6 @@ initialState =
   , customImage:   Nothing
   , uploadError:   Nothing
   , useBacktracking: false
-  , tiledMode:       false
   , viewedStep:      Nothing
   , patternSize:     checkerboard.n
   , outW:            checkerboard.outW
@@ -149,6 +160,8 @@ initialState =
   , outputPeriodic:  checkerboard.periodic
   , extractedWith:   Nothing
   , stepBackedOut:   false
+  , customTileSet:   Nothing
+  , tilesetPalette:  Nothing
   }
 
 -- ---------------------------------------------------------------------------
@@ -176,20 +189,62 @@ sampleMetaOf s = { name: s.name, palette: s.palette, outW: s.outW, outH: s.outH 
 tileSampleMetaOf :: TileSampleDef -> SampleMeta
 tileSampleMetaOf s = { name: s.name, palette: s.palette, outW: s.outW, outH: s.outH }
 
--- Resolves the active *overlapping-model* sample (built-in or uploaded);
--- meaningless while `tiledMode` is on (image upload only applies there).
+-- Output size an XML tileset defaults to — unlike SampleDef/TileSampleDef,
+-- the XML format itself doesn't declare one (the original repo pairs it
+-- with separate app config this project doesn't have), so all 7 just get
+-- the same reasonable constant; still fully overridable via Result W/H.
+defaultXmlTilesetSize :: Int
+defaultXmlTilesetSize = 24
+
+-- Where each of the 4 concatenated sample lists starts within the single
+-- flat dropdown (`renderSidebar`'s `sampleNames`): built-in overlapping,
+-- then "(image)", then "(Tiled)" hand-authored, then "(Tileset)" XML.
+handTiledOffset :: Int
+handTiledOffset = Array.length samples + Array.length imageSamples
+
+xmlTilesetOffset :: Int
+xmlTilesetOffset = handTiledOffset + Array.length TileSamples.samples
+
+sourceKindOfIdx :: Int -> SourceKind
+sourceKindOfIdx idx
+  | idx < Array.length samples = SrcBuiltin
+  | idx < handTiledOffset      = SrcImage
+  | idx < xmlTilesetOffset     = SrcHandTiled
+  | otherwise                  = SrcXmlTileset
+
+sourceKindOf :: State -> SourceKind
+sourceKindOf st = sourceKindOfIdx st.sampleIdx
+
+isOverlappingSource :: SourceKind -> Boolean
+isOverlappingSource SrcBuiltin = true
+isOverlappingSource SrcImage   = true
+isOverlappingSource _          = false
+
+-- Resolves the active *overlapping-model* sample (built-in, "(image)", or
+-- a raw upload — `customImage` is set the same way for the latter two, so
+-- this doesn't need to know which); meaningless for the tile-based sources.
 currentSampleDef :: State -> SampleDef
 currentSampleDef st = case st.customImage of
   Just ci -> WP.customSampleDef ci
   Nothing -> fromMaybe (unsafeHead samples) (Array.index samples st.sampleIdx)
 
 currentTileSample :: State -> TileSampleDef
-currentTileSample st = fromMaybe (unsafeHead TileSamples.samples) (Array.index TileSamples.samples st.sampleIdx)
+currentTileSample st = fromMaybe (unsafeHead TileSamples.samples) (Array.index TileSamples.samples (st.sampleIdx - handTiledOffset))
+
+currentXmlTileSampleName :: State -> String
+currentXmlTileSampleName st =
+  fromMaybe "Tileset" (_.name <$> Array.index xmlTileSamples (st.sampleIdx - xmlTilesetOffset))
 
 currentSample :: State -> SampleMeta
-currentSample st
-  | st.tiledMode = tileSampleMetaOf (currentTileSample st)
-  | otherwise    = sampleMetaOf (currentSampleDef st)
+currentSample st = case sourceKindOf st of
+  SrcHandTiled  -> tileSampleMetaOf (currentTileSample st)
+  SrcXmlTileset ->
+    { name: currentXmlTileSampleName st
+    , palette: fromMaybe (const "#888888") st.tilesetPalette
+    , outW: defaultXmlTilesetSize
+    , outH: defaultXmlTilesetSize
+    }
+  _ -> sampleMetaOf (currentSampleDef st)
 
 unsafeHead :: forall a. Array a -> a
 unsafeHead arr = case Array.head arr of
@@ -197,13 +252,14 @@ unsafeHead arr = case Array.head arr of
   Nothing -> unsafeHead arr  -- should never happen for non-empty arrays
 
 -- The active sample's own N/output-size defaults — recomputed whenever the
--- sample source changes (SelectSample/UploadImage/ToggleTiledMode) so the
--- pattern-size/result-size controls start at a sensible value instead of
--- carrying over the previous sample's numbers.
+-- sample source changes (SelectSample/UploadImage) so the pattern-size/
+-- result-size controls start at a sensible value instead of carrying over
+-- the previous sample's numbers.
 sampleDefaults :: State -> { n :: Int, outW :: Int, outH :: Int, periodic :: Boolean }
-sampleDefaults st
-  | st.tiledMode = let ts = currentTileSample st in { n: 1, outW: ts.outW, outH: ts.outH, periodic: ts.periodic }
-  | otherwise    = let s  = currentSampleDef st  in { n: s.n, outW: s.outW, outH: s.outH, periodic: s.periodic }
+sampleDefaults st = case sourceKindOf st of
+  SrcHandTiled  -> let ts = currentTileSample st in { n: 1, outW: ts.outW, outH: ts.outH, periodic: ts.periodic }
+  SrcXmlTileset -> { n: 1, outW: defaultXmlTilesetSize, outH: defaultXmlTilesetSize, periodic: true }
+  _             -> let s = currentSampleDef st in { n: s.n, outW: s.outW, outH: s.outH, periodic: s.periodic }
 
 -- What to actually render: the live latest grid, unless the user clicked a
 -- past progress-bar square to review it (`viewedStep`), in which case that
@@ -229,8 +285,9 @@ patternsStale st = case st.extractedWith of
 
 stopCommand :: WP.Command
 stopCommand =
-  { kind: "stop", sampleIdx: 0, mode: "", custom: WP.emptyCustomImage
-  , useBacktracking: false, tiledMode: false
+  { kind: "stop", sourceKind: "builtin", sampleIdx: 0, mode: ""
+  , custom: WP.emptyCustomImage, customTileSet: WP.emptyCustomTileSet
+  , useBacktracking: false
   , patternSize: 1, outW: 1, outH: 1
   , useRotations: false, useMirror: false
   , inputPeriodic: false, outputPeriodic: false
@@ -240,7 +297,7 @@ stopCommand =
 -- session — unlike `stopCommand`, which only cancels (Stop deliberately
 -- keeps the session alive so Step/Run can resume from it). Sent whenever
 -- the sample/settings actually change underneath it: Extract, Reset,
--- switching samples, toggling tiled mode.
+-- switching samples.
 resetSessionCommand :: WP.Command
 resetSessionCommand = stopCommand { kind = "resetSession" }
 
@@ -248,22 +305,28 @@ resetSessionCommand = stopCommand { kind = "resetSession" }
 -- just tell the worker what sample/settings to (lazily) build a fresh
 -- session from if it doesn't have a live one already; `mode` only matters
 -- to "run" ("once"/"untilSolved" — "step" ignores it, always single-shot).
+-- `sourceKind` tells the worker which of `sampleIdx`/`custom`/
+-- `customTileSet` is meaningful — the other two are left at their empty
+-- defaults, same idea as `-1 means use custom` before, just explicit.
 buildCommand :: State -> String -> String -> WP.Command
-buildCommand st kind mode = case st.customImage of
-  Just ci | not st.tiledMode ->
-    { kind, sampleIdx: -1, mode, custom: ci
-    , useBacktracking: st.useBacktracking, tiledMode: false
-    , patternSize: st.patternSize, outW: st.outW, outH: st.outH
-    , useRotations: st.useRotations, useMirror: st.useMirror
-    , inputPeriodic: st.inputPeriodic, outputPeriodic: st.outputPeriodic
-    }
-  _ ->
-    { kind, sampleIdx: st.sampleIdx, mode, custom: WP.emptyCustomImage
-    , useBacktracking: st.useBacktracking, tiledMode: st.tiledMode
-    , patternSize: st.patternSize, outW: st.outW, outH: st.outH
-    , useRotations: st.useRotations, useMirror: st.useMirror
-    , inputPeriodic: st.inputPeriodic, outputPeriodic: st.outputPeriodic
-    }
+buildCommand st kind mode =
+  let base =
+        { kind, mode, sampleIdx: 0
+        , custom: WP.emptyCustomImage, customTileSet: WP.emptyCustomTileSet
+        , useBacktracking: st.useBacktracking
+        , patternSize: st.patternSize, outW: st.outW, outH: st.outH
+        , useRotations: st.useRotations, useMirror: st.useMirror
+        , inputPeriodic: st.inputPeriodic, outputPeriodic: st.outputPeriodic
+        , sourceKind: "builtin"
+        }
+  in case sourceKindOf st of
+    SrcBuiltin    -> base { sampleIdx = st.sampleIdx }
+    SrcImage      -> base { sourceKind = "image", custom = fromMaybe WP.emptyCustomImage st.customImage }
+    SrcHandTiled  -> base { sourceKind = "handTiled", sampleIdx = st.sampleIdx - handTiledOffset }
+    SrcXmlTileset -> base
+      { sourceKind = "xmlTileset"
+      , customTileSet = maybe WP.emptyCustomTileSet (WP.toWireTileSet (currentXmlTileSampleName st)) st.customTileSet
+      }
 
 runCommand :: State -> String -> WP.Command
 runCommand st mode = buildCommand st "run" mode
@@ -287,6 +350,7 @@ resetRunState s = s
   , viewedStep    = Nothing
   , extractedWith = Nothing
   , stepBackedOut = false
+  , tilesetPalette = Nothing
   }
 
 -- Reasonable defaults for a freshly-decoded upload: N=3 when the image is at
@@ -454,21 +518,21 @@ render st =
     ]
 
 -- Sample source: picking/building/inspecting the pattern source, not
--- running it — select, mode toggles, upload, Extract/Patterns, pattern list.
+-- running it — select, upload, size/rotate/mirror/periodic controls,
+-- Extract/Patterns, pattern list. One flat dropdown across all 4 sample
+-- kinds (built-in overlapping, "(image)", "(Tiled)" hand-authored,
+-- "(Tileset)" XML-parsed) — see `sourceKindOf`/the offset helpers above.
 renderSidebar :: State -> H.ComponentHTML Action Slots Aff
 renderSidebar st =
   let sampleNames =
-        if st.tiledMode
-          then map _.name TileSamples.samples
-          else map _.name samples <> map _.name imageSamples
+        map _.name samples <> map _.name imageSamples <> map _.name TileSamples.samples <> map _.name xmlTileSamples
   in
   HH.div
     [ HP.class_ (H.ClassName "sidebar") ]
     [ HH.select
         [ HE.onSelectedIndexChange SelectSample ]
         (Array.mapWithIndex renderOption sampleNames)
-    , renderModeToggle st
-    , if st.tiledMode then HH.text "" else renderUpload st
+    , if isOverlappingSource (sourceKindOf st) then renderUpload st else HH.text ""
     , renderSizeControls st
     , renderSourcePreview st
     , renderSourceControls st
@@ -486,25 +550,6 @@ renderRunPanel st =
     [ renderRunControls st
     , renderStats st
     , renderProgress st
-    ]
-
--- Switches the sample source between the overlapping model (image-derived
--- patterns) and the tiled model (hand-authored tiles + socket adjacency,
--- WFC.Tiles) — both build the same PatternCatalog/AdjacencyRules pair the
--- solving engine consumes, this only changes which one supplies them.
--- Image upload only applies to the overlapping model, so its UI is hidden
--- while tiled mode is active.
-renderModeToggle :: State -> H.ComponentHTML Action Slots Aff
-renderModeToggle st =
-  HH.label
-    [ HP.class_ (H.ClassName "toggle-row") ]
-    [ HH.input
-        [ HP.type_ HP.InputCheckbox
-        , HP.checked st.tiledMode
-        , HP.disabled st.running
-        , HE.onChecked \_ -> ToggleTiledMode
-        ]
-    , HH.text " Tiled mode (hand-authored tiles)"
     ]
 
 -- File upload: pick a small (<=32x32) image to use as the pattern source
@@ -548,7 +593,7 @@ renderSizeControls :: State -> H.ComponentHTML Action Slots Aff
 renderSizeControls st =
   HH.div
     [ HP.class_ (H.ClassName "size-controls") ]
-    ( ( if st.tiledMode then []
+    ( ( if not (isOverlappingSource (sourceKindOf st)) then []
         else
           [ HH.label
               [ HP.class_ (H.ClassName "size-label") ]
@@ -628,14 +673,16 @@ renderSizeOption current n =
     [ HH.text (show n <> "×" <> show n) ]
 
 -- What Extract actually reads from: the raw source grid (built-in sample
--- or uploaded image) for the overlapping model, or the raw tile set for
--- the tiled model — shown as-is, before any patterns get extracted from
--- it, so the dropdown/upload/tiled-mode choice is visible up front instead
--- of only showing up once you've already clicked Extract.
+-- or uploaded image) for the overlapping model, the raw tile set for the
+-- hand-authored tiled model, or the parsed tile list for an XML tileset —
+-- shown as-is, before any patterns get extracted from it, so the dropdown
+-- choice is visible up front instead of only showing up once you've
+-- already clicked Extract.
 renderSourcePreview :: State -> H.ComponentHTML Action Slots Aff
-renderSourcePreview st
-  | st.tiledMode = renderTilePreview (currentTileSample st)
-  | otherwise    = renderGridPreview (currentSampleDef st)
+renderSourcePreview st = case sourceKindOf st of
+  SrcHandTiled  -> renderTilePreview (currentTileSample st)
+  SrcXmlTileset -> renderXmlTilesetPreview st
+  _             -> renderGridPreview (currentSampleDef st)
 
 renderGridPreview :: SampleDef -> H.ComponentHTML Action Slots Aff
 renderGridPreview sample =
@@ -664,6 +711,32 @@ renderTilePreview ts =
                 []
              ) ts.tiles)
     ]
+
+-- Minimal preview for now (per-tile-name color swatches, ignoring
+-- orientation) — no real tile-image rendering yet, that's a follow-up.
+renderXmlTilesetPreview :: State -> H.ComponentHTML Action Slots Aff
+renderXmlTilesetPreview st =
+  HH.div
+    [ HP.class_ (H.ClassName "source-preview") ]
+    [ HH.div [ HP.class_ (H.ClassName "source-label") ] [ HH.text ("Source: " <> currentXmlTileSampleName st) ]
+    , case st.customTileSet of
+        Nothing -> HH.text "Loading…"
+        Just def ->
+          HH.div
+            [ HP.class_ (H.ClassName "tile-list") ]
+            (Array.mapWithIndex
+              (\i t ->
+                HH.div
+                  [ HP.class_ (H.ClassName "tile-swatch")
+                  , HP.style ("background:" <> hueColor i <> ";")
+                  , HP.title (t.name <> " (" <> show t.symmetry <> ")")
+                  ]
+                  []
+              )
+              def.tiles)
+    ]
+  where
+  hueColor i = "hsl(" <> show ((i * 137) `mod` 360) <> ", 60%, 55%)"
 
 -- Stays in the left sidebar: controls that pick/build the sample source.
 renderSourceControls :: State -> H.ComponentHTML Action Slots Aff
@@ -991,19 +1064,18 @@ handleAction = case _ of
     for_ st.worker (H.liftEffect <<< Worker.terminate)
 
   SelectSample idx -> do
-    st <- H.get
     sendToWorker resetSessionCommand
     H.modify_ \s -> (resetRunState s)
-      { sampleIdx   = idx
-      , customImage = Nothing
-      , uploadError = Nothing
+      { sampleIdx     = idx
+      , customImage   = Nothing
+      , uploadError   = Nothing
+      , customTileSet = Nothing
       }
-    if not st.tiledMode && idx >= Array.length samples
-      then
-        -- Indices past the hand-authored `samples` list are the bundled
-        -- reference images (Demo.ImageSamples) — decode the same way an
-        -- uploaded file would be, just fetched from a static path instead
-        -- of a File/Blob.
+    case sourceKindOfIdx idx of
+      SrcImage ->
+        -- Indices in the "(image)" range are the bundled reference images
+        -- (Demo.ImageSamples) — decode the same way an uploaded file
+        -- would be, just fetched from a static path instead of a File/Blob.
         case Array.index imageSamples (idx - Array.length samples) of
           Nothing  -> applySampleDefaults
           Just def -> do
@@ -1012,7 +1084,22 @@ handleAction = case _ of
               Left err     -> H.modify_ _ { uploadError = Just err }
               Right loaded -> H.modify_ _ { customImage = Just (customImageFrom loaded) }
             applySampleDefaults
-      else
+      SrcXmlTileset ->
+        -- Indices in the "(Tileset)" range are the original-WFC XML
+        -- tileset files — fetch the XML text, then parse it into a
+        -- `TileSetDef` (the actual catalog/rules only get built at
+        -- Extract time, same as every other source).
+        case Array.index xmlTileSamples (idx - xmlTilesetOffset) of
+          Nothing  -> applySampleDefaults
+          Just def -> do
+            result <- H.liftAff (Fetch.fetchText def.xmlPath)
+            case result of
+              Left err -> H.modify_ _ { uploadError = Just err }
+              Right xmlText -> case parseTileSetXml xmlText of
+                Left err   -> H.modify_ _ { uploadError = Just ("XML parse error: " <> err) }
+                Right def' -> H.modify_ _ { customTileSet = Just def' }
+            applySampleDefaults
+      _ ->
         applySampleDefaults
     drawCanvas
 
@@ -1041,16 +1128,23 @@ handleAction = case _ of
   ExtractPatterns -> do
     st <- H.get
     sendToWorker resetSessionCommand
-    let Tuple cat rules =
-          if st.tiledMode
-            then
+    let Tuple (Tuple cat rules) palette =
+          case sourceKindOf st of
+            SrcHandTiled ->
               let ts = currentTileSample st
-                  c  = buildTiledCatalog ts.tiles
-              in Tuple c (buildTiledRules ts.tiles)
-            else
+              in Tuple (Tuple (buildTiledCatalog ts.tiles) (buildTiledRules ts.tiles)) Nothing
+            SrcXmlTileset ->
+              -- `st.customTileSet` should already be loaded by the time
+              -- Extract is reachable (the button/its highlight don't wait
+              -- on the fetch), but fall back to an empty tileset rather
+              -- than crash if it's clicked mid-load.
+              let def = fromMaybe { unique: false, tiles: [], neighbors: [], subsets: [] } st.customTileSet
+                  built = WP.buildIntCatalogFromTileSet def
+              in Tuple (Tuple built.catalog built.rules) (Just built.palette)
+            _ ->
               let sample = currentSampleDef st
                   c      = extractPatterns st.patternSize st.inputPeriodic st.useRotations st.useMirror sample.grid
-              in Tuple c (buildRules c)
+              in Tuple (Tuple c (buildRules c)) Nothing
         wave = initWave cat rules { width: st.outW, height: st.outH } st.outputPeriodic
     H.modify_ \s -> s
       { status      = Ready
@@ -1066,7 +1160,8 @@ handleAction = case _ of
           { patternSize: st.patternSize, useRotations: st.useRotations, useMirror: st.useMirror
           , inputPeriodic: st.inputPeriodic
           }
-      , stepBackedOut = false
+      , stepBackedOut  = false
+      , tilesetPalette = palette
       }
     drawCanvas
 
@@ -1144,17 +1239,6 @@ handleAction = case _ of
 
   ToggleBacktracking ->
     H.modify_ \st -> st { useBacktracking = not st.useBacktracking }
-
-  ToggleTiledMode -> do
-    sendToWorker resetSessionCommand
-    H.modify_ \s -> (resetRunState s)
-      { tiledMode   = not s.tiledMode
-      , sampleIdx   = 0
-      , customImage = Nothing
-      , uploadError = Nothing
-      }
-    applySampleDefaults
-    drawCanvas
 
   ViewStep i -> do
     H.modify_ _ { viewedStep = Just i }

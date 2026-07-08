@@ -12,7 +12,7 @@ import Data.Tuple (Tuple(..))
 import Demo.Samples (checkerboard, samples)
 import Demo.TileSamples (roads)
 import Demo.TileSamples as TileSamples
-import Demo.WorkerProtocol (Command, Progress, customSampleDef, emptyProgress, markContradiction, solvedCount, totalCellCount, waveToSnapshot)
+import Demo.WorkerProtocol (Command, Progress, buildIntCatalogFromTileSet, customSampleDef, emptyProgress, fromWireTileSet, markContradiction, solvedCount, totalCellCount, waveToSnapshot)
 import Effect (Effect)
 import Effect.Aff (Aff, delay, launchAff_)
 import Effect.Class (liftEffect)
@@ -86,21 +86,28 @@ handleMessage tokenRef sessionRef ev = do
 -- Build the (cat/rules/outW/outH/periodic) a fresh session needs from a
 -- Command — the same construction "run" always did, now shared with
 -- "step" so either can lazily initialize the session on first use.
+-- `cmd.sourceKind` picks which of the demo's 4 sample sources this is;
+-- "image"/"xmlTileset" carry their own already-fetched/parsed plain data
+-- (`custom`/`customTileSet`) instead of indexing a compiled-in list.
 buildFromCommand
   :: Command
   -> { cat :: PatternCatalog Int, rules :: AdjacencyRules, outW :: Int, outH :: Int, periodic :: Boolean }
 buildFromCommand cmd =
-  if cmd.tiledMode then
-    let ts = fromMaybe roads (Array.index TileSamples.samples cmd.sampleIdx)
-    in { cat: buildTiledCatalog ts.tiles, rules: buildTiledRules ts.tiles
-       , outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic
-       }
-  else
-    let sample = if cmd.sampleIdx == -1
-                   then customSampleDef cmd.custom
-                   else fromMaybe checkerboard (Array.index samples cmd.sampleIdx)
-        cat    = extractPatterns cmd.patternSize cmd.inputPeriodic cmd.useRotations cmd.useMirror sample.grid
-    in { cat, rules: buildRules cat, outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic }
+  case cmd.sourceKind of
+    "handTiled" ->
+      let ts = fromMaybe roads (Array.index TileSamples.samples cmd.sampleIdx)
+      in { cat: buildTiledCatalog ts.tiles, rules: buildTiledRules ts.tiles
+         , outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic
+         }
+    "xmlTileset" ->
+      let built = buildIntCatalogFromTileSet (fromWireTileSet cmd.customTileSet)
+      in { cat: built.catalog, rules: built.rules, outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic }
+    _ ->
+      let sample = if cmd.sourceKind == "image"
+                     then customSampleDef cmd.custom
+                     else fromMaybe checkerboard (Array.index samples cmd.sampleIdx)
+          cat    = extractPatterns cmd.patternSize cmd.inputPeriodic cmd.useRotations cmd.useMirror sample.grid
+      in { cat, rules: buildRules cat, outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic }
 
 -- Reuse the existing session if one's alive, otherwise build a brand-new
 -- wave/search from `cmd` and stash it — this is what makes an idle worker
