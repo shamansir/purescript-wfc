@@ -4,7 +4,7 @@ import Prelude
 
 import Data.Array as Array
 import Data.Either (Either(..), isLeft)
-import Data.Foldable (all)
+import Data.Foldable (all, for_)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe, isJust)
 import Data.Number (log)
@@ -31,6 +31,9 @@ import WFC.Algorithm (wfc, wfcWithRetry)
 import WFC.Backtrack (StepResult(..), solveWithBacktracking, stepSearch)
 import WFC.Render (renderWave, renderWaveWith)
 import WFC.Tiles (TileDef, buildTiledCatalog, buildTiledRules, sidesMatch)
+import WFC.TileSet as TS
+import WFC.TileSet.Symmetry (Symmetry(..), cardinality, distinctOrientations, parseSymmetry, rotateIndex, rotateIndexBy)
+import WFC.TileSet.Xml (parseTileSetXml)
 
 -- ---------------------------------------------------------------------------
 -- Test fixtures
@@ -120,6 +123,103 @@ tileCatalog = buildTiledCatalog tileSet
 
 tileRules :: AdjacencyRules
 tileRules = buildTiledRules tileSet
+
+-- test/Demo/tilesets/Knots.xml, embedded verbatim — the smallest of the 7
+-- real original-WFC tileset XML files (5 tiles, 35 neighbor rules, 10
+-- subsets), used to cross-check WFC.TileSet.Xml/WFC.TileSet end-to-end
+-- against real data rather than only synthetic fixtures.
+knotsXml :: String
+knotsXml =
+  """<set>
+  <tiles>
+    <tile name="corner" symmetry="L"/>
+    <tile name="cross" symmetry="I"/>
+    <tile name="empty" symmetry="X"/>
+    <tile name="line" symmetry="I"/>
+    <tile name="t" symmetry="T"/>
+  </tiles>
+  <neighbors>
+    <neighbor left="corner 1" right="empty"/>
+    <neighbor left="corner" right="cross"/>
+    <neighbor left="corner" right="cross 1"/>
+    <neighbor left="corner" right="line"/>
+    <neighbor left="corner 1" right="line 1"/>
+    <neighbor left="corner" right="t 2"/>
+    <neighbor left="corner" right="t 3"/>
+    <neighbor left="corner" right="t"/>
+    <neighbor left="corner 1" right="t 1"/>
+    <neighbor left="corner 1" right="corner 3"/>
+    <neighbor left="corner 1" right="corner"/>
+    <neighbor left="corner" right="corner 1"/>
+    <neighbor left="corner" right="corner 2"/>
+    <neighbor left="cross" right="cross"/>
+    <neighbor left="cross" right="cross 1"/>
+    <neighbor left="cross 1" right="cross 1"/>
+    <neighbor left="cross" right="line"/>
+    <neighbor left="cross 1" right="line"/>
+    <neighbor left="cross" right="t"/>
+    <neighbor left="cross" right="t 3"/>
+    <neighbor left="cross 1" right="t"/>
+    <neighbor left="cross 1" right="t 3"/>
+    <neighbor left="empty" right="empty"/>
+    <neighbor left="empty" right="line 1"/>
+    <neighbor left="empty" right="t 1"/>
+    <neighbor left="line" right="line"/>
+    <neighbor left="line 1" right="line 1"/>
+    <neighbor left="line" right="t"/>
+    <neighbor left="line 1" right="t 1"/>
+    <neighbor left="line" right="t 3"/>
+    <neighbor left="t 1" right="t 3"/>
+    <neighbor left="t" right="t"/>
+    <neighbor left="t 2" right="t"/>
+    <neighbor left="t 1" right="t"/>
+    <neighbor left="t 3" right="t 1"/>
+  </neighbors>
+  <subsets>
+    <subset name="Standard">
+      <tile name="corner"/>
+      <tile name="cross"/>
+      <tile name="empty"/>
+      <tile name="line"/>
+    </subset>
+    <subset name="Dense">
+      <tile name="corner"/>
+      <tile name="cross"/>
+      <tile name="line"/>
+    </subset>
+    <subset name="Crossless">
+      <tile name="corner"/>
+      <tile name="empty"/>
+      <tile name="line"/>
+    </subset>
+    <subset name="TE">
+      <tile name="t"/>
+      <tile name="empty"/>
+    </subset>
+    <subset name="T">
+      <tile name="t"/>
+    </subset>
+    <subset name="CL">
+      <tile name="corner"/>
+      <tile name="line"/>
+    </subset>
+    <subset name="CE">
+      <tile name="corner"/>
+      <tile name="empty"/>
+    </subset>
+    <subset name="C">
+      <tile name="corner"/>
+    </subset>
+    <subset name="Fabric">
+      <tile name="cross"/>
+      <tile name="line"/>
+    </subset>
+    <subset name="Dense Fabric">
+      <tile name="cross"/>
+    </subset>
+  </subsets>
+</set>
+"""
 
 -- ---------------------------------------------------------------------------
 -- Tests
@@ -653,3 +753,171 @@ main = runSpecAndExitProcess [consoleReporter] do
                       else [ Tuple (Tuple x y) (Tuple nx ny) ]
                   _ -> []
           violations `shouldEqual` []
+
+  -- =========================================================================
+  describe "Stage 11 · WFC.TileSet — original-WFC tileset system (symmetry + neighbor rules, XML)" do
+  -- =========================================================================
+  -- Same solving engine, same PatternCatalog/AdjacencyRules pair as
+  -- WFC.Tiles's socket-based model — this module is a different way to
+  -- *author* one: symmetry-expanded tiles + an explicit, rotation-expanded
+  -- neighbor-rule list (parsed from the original algorithm's XML format),
+  -- instead of hand-listed per-tile sockets.
+
+    describe "WFC.TileSet.Symmetry — per-class rotation cardinality" do
+
+      it "cardinality matches each symmetry class' distinct-orientation count" do
+        cardinality SymX `shouldEqual` 1
+        cardinality SymI `shouldEqual` 2
+        cardinality SymDiag `shouldEqual` 2
+        cardinality SymL `shouldEqual` 4
+        cardinality SymT `shouldEqual` 4
+        cardinality SymF `shouldEqual` 8
+
+      it "distinctOrientations is exactly 0..cardinality-1" do
+        distinctOrientations SymX `shouldEqual` [ 0 ]
+        distinctOrientations SymI `shouldEqual` [ 0, 1 ]
+        distinctOrientations SymL `shouldEqual` [ 0, 1, 2, 3 ]
+        distinctOrientations SymF `shouldEqual` [ 0, 1, 2, 3, 4, 5, 6, 7 ]
+
+      it "rotating 4 times returns to the start, for every symmetry class" do
+        let allSyms = [ SymX, SymI, SymDiag, SymL, SymT, SymF ]
+        for_ allSyms \sym ->
+          for_ (distinctOrientations sym) \i ->
+            rotateIndexBy sym 4 i `shouldEqual` i
+
+      it "SymI/SymDiag rotation is order-2 (180° rotation is a no-op)" do
+        rotateIndex SymI 0 `shouldEqual` 1
+        rotateIndex SymI 1 `shouldEqual` 0
+        rotateIndexBy SymI 2 0 `shouldEqual` 0
+        rotateIndexBy SymDiag 2 1 `shouldEqual` 1
+
+      it "SymL/SymT rotation is a plain 4-cycle" do
+        map (rotateIndex SymL) [ 0, 1, 2, 3 ] `shouldEqual` [ 1, 2, 3, 0 ]
+        map (rotateIndex SymT) [ 0, 1, 2, 3 ] `shouldEqual` [ 1, 2, 3, 0 ]
+
+      it "parseSymmetry accepts all 6 class codes and rejects unknown ones" do
+        parseSymmetry "X" `shouldEqual` Right SymX
+        parseSymmetry "I" `shouldEqual` Right SymI
+        parseSymmetry "\\" `shouldEqual` Right SymDiag
+        parseSymmetry "L" `shouldEqual` Right SymL
+        parseSymmetry "T" `shouldEqual` Right SymT
+        parseSymmetry "F" `shouldEqual` Right SymF
+        parseSymmetry "?" `shouldSatisfy` isLeft
+
+    describe "expandRule — one declared rule expanded across all 4 grid rotations" do
+
+      it "always produces exactly 4 facts, one per cardinal direction" do
+        let symOf _ = SymF
+            rule = { leftName: "a", leftRot: 0, rightName: "b", rightRot: 0 }
+            facts = TS.expandRule symOf rule
+        Array.length facts `shouldEqual` 4
+        Array.sort (map _.dir facts) `shouldEqual` Array.sort allDirections
+
+      it "SymX never changes orientation, in any of the 4 rotations" do
+        let symOf _ = SymX
+            rule = { leftName: "empty", leftRot: 0, rightName: "empty", rightRot: 0 }
+            facts = TS.expandRule symOf rule
+        for_ facts \f -> do
+          f.left `shouldEqual` TS.TileInstance { name: "empty", orientation: 0 }
+          f.right `shouldEqual` TS.TileInstance { name: "empty", orientation: 0 }
+
+      it "SymI alternates orientation 0/1 every 90°, cycling every 180°" do
+        let symOf _ = SymI
+            rule = { leftName: "track", leftRot: 0, rightName: "wire", rightRot: 0 }
+            facts = TS.expandRule symOf rule
+            leftAt dir = _.left <$> Array.find (\f -> f.dir == dir) facts
+        leftAt DirR `shouldEqual` Just (TS.TileInstance { name: "track", orientation: 0 })
+        leftAt DirD `shouldEqual` Just (TS.TileInstance { name: "track", orientation: 1 })
+        leftAt DirL `shouldEqual` Just (TS.TileInstance { name: "track", orientation: 0 })
+        leftAt DirU `shouldEqual` Just (TS.TileInstance { name: "track", orientation: 1 })
+
+    describe "buildTileSet — PatternCatalog/AdjacencyRules from a TileSetDef" do
+
+      let
+        synthDef :: TS.TileSetDef
+        synthDef =
+          { unique: false
+          , tiles:
+              [ { name: "blank", symmetry: SymX, weight: 5.0 }
+              , { name: "corner", symmetry: SymL, weight: 2.0 }
+              ]
+          , neighbors:
+              [ { leftName: "blank", leftRot: 0, rightName: "blank", rightRot: 0 }
+              , { leftName: "corner", leftRot: 0, rightName: "blank", rightRot: 0 }
+              ]
+          , subsets: []
+          }
+        built = TS.buildTileSet synthDef
+        tileName (TS.TileInstance t) = t.name
+
+      it "catalog has one PatternId per (tile, distinct orientation)" do
+        Map.size built.catalog.patterns `shouldEqual` 5 -- 1 (blank, X) + 4 (corner, L)
+        built.catalog.size `shouldEqual` 1
+
+      it "every orientation of a tile keeps that tile's own declared weight" do
+        let entries = Map.toUnfoldable built.index :: Array (Tuple TS.TileInstance PatternId)
+            weightOf ti = Array.findMap (\(Tuple ti' pid) -> if ti' == ti then Map.lookup pid built.catalog.weights else Nothing) entries
+            cornerWeights = Array.mapMaybe (\(Tuple ti _) -> if tileName ti == "corner" then weightOf ti else Nothing) entries
+        Array.length cornerWeights `shouldEqual` 4
+        all (_ == 2.0) cornerWeights `shouldEqual` true
+
+      it "a declared rule is inserted in both directions independently" do
+        let blankPid = Map.lookup (TS.TileInstance { name: "blank", orientation: 0 }) built.index
+            cornerPid = Map.lookup (TS.TileInstance { name: "corner", orientation: 0 }) built.index
+        case Tuple blankPid cornerPid of
+          Tuple (Just bp) (Just cp) -> do
+            Array.elem bp (lookupNeighbors built.rules DirR cp) `shouldEqual` true
+            Array.elem cp (lookupNeighbors built.rules DirL bp) `shouldEqual` true
+          _ -> fail "expected both blank@0 and corner@0 to be in the built index"
+
+    describe "WFC.TileSet.Xml — parsing the real Knots.xml tileset" do
+
+      it "parses all 5 tiles with their declared symmetry" do
+        case parseTileSetXml knotsXml of
+          Left err -> fail ("failed to parse knotsXml: " <> err)
+          Right def -> do
+            Array.length def.tiles `shouldEqual` 5
+            map _.symmetry (Array.sortWith _.name def.tiles)
+              `shouldEqual` [ SymL, SymI, SymX, SymI, SymT ] -- corner, cross, empty, line, t
+
+      it "parses all 35 neighbor rules and 10 subsets" do
+        case parseTileSetXml knotsXml of
+          Left err -> fail ("failed to parse knotsXml: " <> err)
+          Right def -> do
+            Array.length def.neighbors `shouldEqual` 35
+            Array.length def.subsets `shouldEqual` 10
+            def.unique `shouldEqual` false
+
+      it "buildTileSet on the parsed Knots.xml reproduces a hand-checked fact from the file" do
+        -- <neighbor left="empty" right="line 1"/>: empty (SymX) is always
+        -- orientation 0; line (SymI) rotates 0/1 every 90°, alternating
+        -- back every 180° — so the DirR fact is (empty@0, line@1), and its
+        -- 90°-rotation (DirD) uses `rotateIndexBy SymI 1 1 = 0`.
+        case parseTileSetXml knotsXml of
+          Left err -> fail ("failed to parse knotsXml: " <> err)
+          Right def -> do
+            let built = TS.buildTileSet def
+                emptyPid = Map.lookup (TS.TileInstance { name: "empty", orientation: 0 }) built.index
+                lineAt0Pid = Map.lookup (TS.TileInstance { name: "line", orientation: 0 }) built.index
+                lineAt1Pid = Map.lookup (TS.TileInstance { name: "line", orientation: 1 }) built.index
+            case Tuple emptyPid (Tuple lineAt0Pid lineAt1Pid) of
+              Tuple (Just ep) (Tuple (Just l0) (Just l1)) -> do
+                -- DirR: empty@0 -> line@1 (as declared)
+                Array.elem l1 (lookupNeighbors built.rules DirR ep) `shouldEqual` true
+                -- and the reverse entry: line@1 has empty@0 to its DirL
+                Array.elem ep (lookupNeighbors built.rules DirL l1) `shouldEqual` true
+                -- DirD (one grid-rotation step later): empty stays @0 (SymX),
+                -- line's declared orientation 1 rotates to 0
+                Array.elem l0 (lookupNeighbors built.rules DirD ep) `shouldEqual` true
+              _ -> fail "expected empty@0, line@0 and line@1 to all be in the built index"
+
+      it "solves a Knots wave built end-to-end from the parsed XML" do
+        case parseTileSetXml knotsXml of
+          Left err -> fail ("failed to parse knotsXml: " <> err)
+          Right def -> do
+            let built = TS.buildTileSet def
+                wave = initWave built.catalog built.rules { width: 6, height: 6 } true
+            result <- liftEffect $ solveWithBacktracking 2000 wave
+            case result of
+              Left _ -> fail "backtracking failed to solve a small Knots wave"
+              Right w' -> isFullyCollapsed w' `shouldEqual` true

@@ -8,6 +8,9 @@ module WFC
   , module WFC.Propagate
   , module WFC.Render
   , module WFC.Rules
+  , module WFC.TileSet
+  , module WFC.TileSet.Symmetry
+  , module WFC.TileSet.Xml
   , module WFC.Wave
   ) where
 
@@ -19,4 +22,7 @@ import WFC.Pattern (Pattern(..), PatternId(..), VariantTag, agrees, rotate, refl
 import WFC.Propagate (Contradiction(..), BanEvent, propagate)
 import WFC.Render (renderWave, renderWaveWith, topLeftPixel)
 import WFC.Rules (AdjacencyRules(..), buildRules, lookupNeighbors)
+import WFC.TileSet (TileInstance(..), TileDef, NeighborRule, Subset, TileSetDef, RuleFact, rotateDirCW, expandRule, tileInstances, buildTileSet, selectSubset)
+import WFC.TileSet.Symmetry (Symmetry(..), parseSymmetry, cardinality, distinctOrientations, rotateIndex, rotateIndexBy)
+import WFC.TileSet.Xml (parseTileSetXml)
 import WFC.Wave (Cell, CompatMap, Wave, initWave, isFullyCollapsed)

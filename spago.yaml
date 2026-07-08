@@ -18,6 +18,8 @@ package:
     - maybe
     - either
     - newtype
+    - strings
+    - string-parsers
   test:
     main: Test.Main
     dependencies:

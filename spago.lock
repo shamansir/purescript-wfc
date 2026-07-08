@@ -54,6 +54,8 @@
             "partial",
             "prelude",
             "random",
+            "string-parsers",
+            "strings",
             "transformers",
             "tuples"
           ]
@@ -1823,6 +1825,24 @@
         "prelude",
         "tailrec",
         "unsafe-coerce"
+      ]
+    },
+    "string-parsers": {
+      "type": "registry",
+      "version": "8.0.0",
+      "integrity": "sha256-xYexodEcW37sOLAw9R37uKTZjQFEolg3oti8E/sEry4=",
+      "dependencies": [
+        "arrays",
+        "control",
+        "either",
+        "enums",
+        "foldable-traversable",
+        "lists",
+        "maybe",
+        "nonempty",
+        "prelude",
+        "strings",
+        "tailrec"
       ]
     },
     "strings": {
