@@ -57,10 +57,11 @@ customSampleDef ci =
 
 -- main -> worker
 type Command =
-  { kind      :: String -- "run" | "stop"
-  , sampleIdx :: Int     -- ignored for "stop"; -1 means "use `custom` below"
-  , mode      :: String -- "once" | "untilSolved"
-  , custom    :: CustomImage -- ignored unless sampleIdx == -1
+  { kind            :: String -- "run" | "stop"
+  , sampleIdx       :: Int     -- ignored for "stop"; -1 means "use `custom` below"
+  , mode            :: String -- "once" | "untilSolved"
+  , custom          :: CustomImage -- ignored unless sampleIdx == -1
+  , useBacktracking :: Boolean -- undo just the last guess instead of a full restart
   }
 
 -- worker -> main

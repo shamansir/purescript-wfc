@@ -67,6 +67,7 @@ type State =
   , progressLog   :: Array WP.Progress
   , customImage   :: Maybe WP.CustomImage
   , uploadError   :: Maybe String
+  , useBacktracking :: Boolean
   }
 
 data Action
@@ -82,6 +83,7 @@ data Action
   | Stop
   | WorkerMsg MessageEvent
   | TogglePatterns
+  | ToggleBacktracking
 
 type Slots :: forall k. Row k
 type Slots = ()
@@ -109,6 +111,7 @@ initialState =
   , progressLog:   []
   , customImage:   Nothing
   , uploadError:   Nothing
+  , useBacktracking: false
   }
 
 -- ---------------------------------------------------------------------------
@@ -136,12 +139,12 @@ unsafeHead arr = case Array.head arr of
   Nothing -> unsafeHead arr  -- should never happen for non-empty arrays
 
 stopCommand :: WP.Command
-stopCommand = { kind: "stop", sampleIdx: 0, mode: "", custom: WP.emptyCustomImage }
+stopCommand = { kind: "stop", sampleIdx: 0, mode: "", custom: WP.emptyCustomImage, useBacktracking: false }
 
 runCommand :: State -> String -> WP.Command
 runCommand st mode = case st.customImage of
-  Just ci -> { kind: "run", sampleIdx: -1, mode, custom: ci }
-  Nothing -> { kind: "run", sampleIdx: st.sampleIdx, mode, custom: WP.emptyCustomImage }
+  Just ci -> { kind: "run", sampleIdx: -1, mode, custom: ci, useBacktracking: st.useBacktracking }
+  Nothing -> { kind: "run", sampleIdx: st.sampleIdx, mode, custom: WP.emptyCustomImage, useBacktracking: st.useBacktracking }
 
 -- Fields shared by "switch to a different sample" (built-in or uploaded):
 -- drop whatever local wave/run/progress state referred to the old sample.
@@ -374,6 +377,16 @@ renderButtons st =
         , HP.disabled (not st.running)
         ]
         [ HH.text "■ Stop" ]
+    , HH.label
+        [ HP.class_ (H.ClassName "backtracking-toggle") ]
+        [ HH.input
+            [ HP.type_ HP.InputCheckbox
+            , HP.checked st.useBacktracking
+            , HP.disabled st.running
+            , HE.onChecked \_ -> ToggleBacktracking
+            ]
+        , HH.text " Use backtracking"
+        ]
     ]
 
 renderStats :: State -> H.ComponentHTML Action Slots Aff
@@ -687,3 +700,6 @@ handleAction = case _ of
 
   TogglePatterns ->
     H.modify_ \st -> st { showPats = not st.showPats }
+
+  ToggleBacktracking ->
+    H.modify_ \st -> st { useBacktracking = not st.useBacktracking }

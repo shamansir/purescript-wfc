@@ -167,8 +167,7 @@ completion or failure) and the demo's own worker loop are built from — see
 
 ## Incremental backtracking (`WFC.Backtrack`)
 
-Added 2026-07-08 alongside `wfc`/`wfcWithRetry`, not replacing them (the
-demo's worker still uses restart-based solving). `WFC.md` documents
+Added 2026-07-08 alongside `wfc`/`wfcWithRetry`, not replacing them. `WFC.md` documents
 restart-on-failure and true backtracking — "undo just the last guess, ban
 that value, retry" — as two accepted contradiction-recovery strategies;
 this module is the second one.
@@ -268,6 +267,15 @@ neither of which `wfc`/`wfcWithRetry` expose. The collapse/propagate
 mechanics invoked are identical either way (`step` is the shared atomic
 primitive); this is a UI-driven wrapper, not a second algorithm
 implementation.
+
+Since 2026-07-08 the demo exposes **both** contradiction-recovery
+strategies via a "Use backtracking" checkbox: `runBacktrackLoop` is the
+same outer shape as `runLoop` (token check → `postMessage` → `delay 0.0` →
+recurse), but drives `WFC.Backtrack.stepSearch`/`initSearch` instead of
+`WFC.Algorithm.step`, one unit of search at a time, so backtracking runs
+are just as progress-streamed and `Stop`-interruptible as restart-based
+ones. `Demo.WorkerProtocol.Command` carries the choice as
+`useBacktracking :: Boolean`.
 
 ## Differences from the `WFC.md` description
 

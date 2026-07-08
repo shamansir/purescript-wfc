@@ -30,6 +30,20 @@ type Frame a =
   , untried :: Set PatternId
   }
 
+type SearchState a =
+  { stack    :: NonEmptyList (Frame a)
+  , attempts :: Int
+  }
+
+-- One unit of backtracking search progress. Mirrors `WFC.Algorithm.step`'s
+-- role, but with a third outcome: a bad guess doesn't necessarily end the
+-- search (`Continue`), only exhausting every alternative all the way back
+-- to the first cell does (`Failed`).
+data StepResult a
+  = Continue (SearchState a)
+  | Solved (Wave a)
+  | Failed Contradiction
+
 -- Ban every possibility at `pos` in `wave` except `value`, then propagate —
 -- the same "commit to one value" step `WFC.Collapse.collapseAt` does, but
 -- parameterized over an explicit choice instead of drawing one itself, so
@@ -52,10 +66,51 @@ nextFrame wave = do
   pure $ mPos >>= \pos ->
     getCellPossibilities wave pos <#> \s -> { wave, pos, untried: s }
 
-type SearchState a =
-  { stack    :: NonEmptyList (Frame a)
-  , attempts :: Int
-  }
+-- Start a new search from `wave0` — `Solved wave0` immediately if it's
+-- already fully collapsed, otherwise the first cell's decision frame.
+initSearch :: forall a. Wave a -> Effect (StepResult a)
+initSearch wave0 = do
+  mFrame0 <- nextFrame wave0
+  pure $ case mFrame0 of
+    Nothing     -> Solved wave0
+    Just frame0 -> Continue { stack: NonEmpty.singleton frame0, attempts: 0 }
+
+-- Advance the search by exactly one unit of work: either backtrack out of
+-- an exhausted frame, or try the next untried value at the current one.
+-- This granularity — one pop, or one value-attempt — is what lets a caller
+-- (e.g. the demo's worker) interleave the search with progress reporting
+-- and cancellation checks, the same way it already does for plain
+-- step-by-step solving via `WFC.Algorithm.step`.
+stepSearch :: forall a. SearchState a -> Effect (StepResult a)
+stepSearch st =
+  let { head: frame, tail: rest } = NonEmpty.uncons st.stack in
+  if Set.isEmpty frame.untried then
+    -- exhausted every value at this cell; backtrack to the parent's
+    -- decision, or fail outright if there's no parent left to try
+    case NonEmpty.fromList rest of
+      Nothing     -> pure (Failed (Contradiction frame.pos))
+      Just parent -> pure (Continue (st { stack = parent }))
+  else do
+    mChosen <- weightedSample frame.wave frame.untried
+    case mChosen of
+      Nothing ->
+        -- no weight left to draw from a non-empty `untried`; treat the
+        -- same as exhausted rather than looping on it forever
+        case NonEmpty.fromList rest of
+          Nothing     -> pure (Failed (Contradiction frame.pos))
+          Just parent -> pure (Continue (st { stack = parent }))
+      Just value -> do
+        let frame'           = frame { untried = Set.delete value frame.untried }
+            stackWithRetried = NonEmpty.cons' frame' rest
+            attempts'        = st.attempts + 1
+        case attemptValue frame.wave frame.pos value of
+          Left _ ->
+            pure (Continue { stack: stackWithRetried, attempts: attempts' })
+          Right wave' -> do
+            mNext <- nextFrame wave'
+            case mNext of
+              Nothing   -> pure (Solved wave')
+              Just next -> pure (Continue { stack: NonEmpty.cons next stackWithRetried, attempts: attempts' })
 
 -- Solve by incremental backtracking: on a bad guess, undo just that guess
 -- (ban the value, try another at the same cell) instead of restarting the
@@ -69,38 +124,14 @@ type SearchState a =
 -- genuinely-unsatisfiable ruleset searching forever.
 solveWithBacktracking :: forall a. Int -> Wave a -> Effect (Either Contradiction (Wave a))
 solveWithBacktracking maxAttempts wave0 = do
-  mFrame0 <- nextFrame wave0
-  case mFrame0 of
-    Nothing     -> pure (Right wave0) -- already fully collapsed
-    Just frame0 -> tailRecM go { stack: NonEmpty.singleton frame0, attempts: 0 }
+  first <- initSearch wave0
+  tailRecM go first
   where
-    go st =
-      let { head: frame, tail: rest } = NonEmpty.uncons st.stack in
-      if st.attempts >= maxAttempts then
-        pure (Done (Left (Contradiction frame.pos)))
-      else if Set.isEmpty frame.untried then
-        -- exhausted every value at this cell; backtrack to the parent's
-        -- decision, or fail outright if there's no parent left to try
-        case NonEmpty.fromList rest of
-          Nothing     -> pure (Done (Left (Contradiction frame.pos)))
-          Just parent -> pure (Loop (st { stack = parent }))
-      else do
-        mChosen <- weightedSample frame.wave frame.untried
-        case mChosen of
-          Nothing ->
-            -- no weight left to draw from a non-empty `untried`; treat the
-            -- same as exhausted rather than looping on it forever
-            case NonEmpty.fromList rest of
-              Nothing     -> pure (Done (Left (Contradiction frame.pos)))
-              Just parent -> pure (Loop (st { stack = parent }))
-          Just value -> do
-            let frame'          = frame { untried = Set.delete value frame.untried }
-                stackWithRetried = NonEmpty.cons' frame' rest
-            case attemptValue frame.wave frame.pos value of
-              Left _ ->
-                pure (Loop { stack: stackWithRetried, attempts: st.attempts + 1 })
-              Right wave' -> do
-                mNext <- nextFrame wave'
-                case mNext of
-                  Nothing   -> pure (Done (Right wave'))
-                  Just next -> pure (Loop { stack: NonEmpty.cons next stackWithRetried, attempts: st.attempts + 1 })
+    go (Solved wave) = pure (Done (Right wave))
+    go (Failed err)  = pure (Done (Left err))
+    go (Continue st)
+      | st.attempts >= maxAttempts =
+          pure (Done (Left (Contradiction (NonEmpty.uncons st.stack).head.pos)))
+      | otherwise = do
+          next <- stepSearch st
+          pure (Loop next)
