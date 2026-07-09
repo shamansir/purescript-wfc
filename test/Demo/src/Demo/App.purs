@@ -23,6 +23,7 @@ import Halogen.HTML.Properties as HP
 import Halogen.Subscription as HS
 import Unsafe.Coerce (unsafeCoerce)
 
+import Demo.DomFx as DomFx
 import Demo.Fetch as Fetch
 import Demo.ImageSamples (imageSamples)
 import Demo.ImageUpload as ImageUpload
@@ -43,6 +44,7 @@ import WFC.Wave (Wave, initWave)
 import Web.Event.Event as Event
 import Web.File.FileList as FileList
 import Web.HTML.HTMLInputElement as HTMLInputElement
+import Web.UIEvent.MouseEvent (MouseEvent)
 import Web.Worker.MessageEvent (MessageEvent)
 import Web.Worker.MessageEvent as MessageEvent
 import Web.Worker.Worker (Worker)
@@ -93,6 +95,7 @@ type State =
   , blankCellSnapshot :: Maybe WP.CellSnapshot -- the fully-uncollapsed cell for the active catalog; built alongside it at Extract time, used to fill new area on a live resize
   , fixOutputSize     :: Boolean -- when true, switching samples keeps Result W/H instead of resetting to the new sample's own defaults
   , trackHistory      :: Boolean -- when false, WorkerMsg stops appending to progressLog and the history squares/canvas stay hidden — off saves memory/redraw cost on a long run
+  , lockSelectedStep  :: Boolean -- when true, Step/Run don't reset viewedStep back to "follow the live step" — the manually-picked step stays selected through further solving
   }
 
 -- Which of the demo's 4 sample sources is currently selected, derived
@@ -136,6 +139,8 @@ data Action
   | SetOutH Int
   | ToggleFixOutputSize
   | ToggleTrackHistory
+  | ToggleLockSelectedStep
+  | ClickHistoryCanvas MouseEvent
   | ToggleRotations
   | ToggleMirror
   | ToggleInputPeriodic
@@ -186,6 +191,7 @@ initialState =
   , blankCellSnapshot: Nothing
   , fixOutputSize:     false
   , trackHistory:      true
+  , lockSelectedStep:  false
   }
 
 -- ---------------------------------------------------------------------------
@@ -294,6 +300,15 @@ activeGrid :: State -> Maybe Grid
 activeGrid st = case st.viewedStep >>= Array.index st.progressLog of
   Just p  -> Just p.grid
   Nothing -> st.displayGrid
+
+-- Which step reads as "selected" in the history squares/canvas: whatever's
+-- manually viewed, or — while following (`viewedStep == Nothing`) — the
+-- newest one, so a live run always shows something highlighted instead of
+-- nothing until the user clicks a square.
+highlightedStep :: State -> Maybe Int
+highlightedStep st = case st.viewedStep of
+  Just i  -> Just i
+  Nothing -> if Array.null st.progressLog then Nothing else Just (Array.length st.progressLog - 1)
 
 -- True when there's no catalog yet, or the pattern-size/rotate/mirror
 -- settings have changed since the catalog currently shown was extracted
@@ -604,6 +619,31 @@ drawCanvas = do
 -- square) once its own extent would otherwise overflow — most runs are one
 -- long row, so keeping cell height at a full 4px while only the width
 -- shrinks is what keeps those readable as a bar instead of a hairline.
+-- The layout `drawHistoryCanvasEffect` paints and `ClickHistoryCanvas`
+-- inverts a click against — kept as one function so the two can never
+-- disagree about where a given step actually landed. `Nothing` when
+-- there's nothing to lay out (tracking off, or no steps yet).
+historyCanvasLayout :: State -> Maybe { rows :: Array HistoryRow, cellW :: Number, cellH :: Number }
+historyCanvasLayout st
+  | not st.trackHistory = Nothing
+  | otherwise =
+      let rows = buildHistoryRows st.progressLog
+      in if Array.null rows
+           then Nothing
+           else
+             let maxCols  = max 1 (fromMaybe 1 (maximum (map (\r -> r.startColumn + Array.length r.cells) rows)))
+                 rowCount = Array.length rows
+                 -- Independent per-axis scaling, not a single shared
+                 -- (square) cell size: a run that's overwhelmingly one long
+                 -- row (the common case — most runs never backtrack) should
+                 -- still get full-height 4px-tall cells even once its
+                 -- *width* has to shrink well below 4px to fit; tying both
+                 -- axes to the same factor turned a 397-step single-row run
+                 -- into a near-invisible 1px sliver instead of a readable bar.
+                 cellW = min 4.0 (512.0 / Int.toNumber maxCols)
+                 cellH = min 4.0 (512.0 / Int.toNumber rowCount)
+             in Just { rows, cellW, cellH }
+
 drawHistoryCanvasEffect :: State -> Effect Unit
 drawHistoryCanvasEffect st = do
   mCanvas <- Canvas.getCanvasElementById "history-canvas"
@@ -616,40 +656,54 @@ drawHistoryCanvasEffect st = do
       Canvas.clearRect ctx { x: 0.0, y: 0.0, width: cw, height: ch }
       Canvas.setFillStyle ctx "#161b22"
       Canvas.fillRect ctx { x: 0.0, y: 0.0, width: cw, height: ch }
-      when st.trackHistory do
-        let rows = buildHistoryRows st.progressLog
-        when (not (Array.null rows)) do
-          let maxCols  = max 1 (fromMaybe 1 (maximum (map (\r -> r.startColumn + Array.length r.cells) rows)))
-              rowCount = Array.length rows
-              -- Independent per-axis scaling, not a single shared (square)
-              -- cell size: a run that's overwhelmingly one long row (the
-              -- common case — most runs never backtrack) should still get
-              -- full-height 4px-tall cells even once its *width* has to
-              -- shrink well below 4px to fit; tying both axes to the same
-              -- factor turned a 397-step single-row run into a near-invisible
-              -- 1px sliver instead of a readable bar.
-              cellW = min 4.0 (cw / Int.toNumber maxCols)
-              cellH = min 4.0 (ch / Int.toNumber rowCount)
-          for_ (Array.mapWithIndex Tuple rows) \(Tuple rowIdx row) ->
-            for_ (Array.mapWithIndex Tuple row.cells) \(Tuple k (Tuple i p)) -> do
-              let col      = row.startColumn + k
-                  x        = Int.toNumber col * cellW
-                  y        = Int.toNumber rowIdx * cellH
-                  percent  = if p.totalCells > 0 then Int.toNumber p.solvedTotal / Int.toNumber p.totalCells else 0.0
-                  lightness = 15 + Int.floor (percent * 45.0)
-                  isContra = p.kind == "contradiction" || p.restarted
-                  color    = if isContra then "#ff4444" else "hsl(130, 55%, " <> show lightness <> "%)"
-              Canvas.setFillStyle ctx color
-              Canvas.fillRect ctx { x, y, width: cellW, height: cellH }
-              when (st.viewedStep == Just i) do
-                Canvas.setStrokeStyle ctx "#58a6ff"
-                Canvas.setLineWidth ctx 1.0
-                Canvas.strokeRect ctx { x, y, width: cellW, height: cellH }
+      for_ (historyCanvasLayout st) \{ rows, cellW, cellH } -> do
+        let highlighted = highlightedStep st
+        for_ (Array.mapWithIndex Tuple rows) \(Tuple rowIdx row) ->
+          for_ (Array.mapWithIndex Tuple row.cells) \(Tuple k (Tuple i p)) -> do
+            let col      = row.startColumn + k
+                x        = Int.toNumber col * cellW
+                y        = Int.toNumber rowIdx * cellH
+                percent  = if p.totalCells > 0 then Int.toNumber p.solvedTotal / Int.toNumber p.totalCells else 0.0
+                lightness = 15 + Int.floor (percent * 45.0)
+                isContra = p.kind == "contradiction" || p.restarted
+                color    = if isContra then "#ff4444" else "hsl(130, 55%, " <> show lightness <> "%)"
+            Canvas.setFillStyle ctx color
+            Canvas.fillRect ctx { x, y, width: cellW, height: cellH }
+            when (highlighted == Just i) do
+              Canvas.setStrokeStyle ctx "#58a6ff"
+              Canvas.setLineWidth ctx 1.0
+              Canvas.strokeRect ctx { x, y, width: cellW, height: cellH }
 
 drawHistoryCanvas :: H.HalogenM State Action Slots Void Aff Unit
 drawHistoryCanvas = do
   st <- H.get
   H.liftEffect $ drawHistoryCanvasEffect st
+
+-- Freeze the display on a specific past step (cancels auto-follow — see
+-- `ToggleTrackHistory`'s doc and `renderProgress`'s `highlighted`) and
+-- bring its square into view; shared by clicking a square directly
+-- (`ViewStep`) and clicking the history canvas (`ClickHistoryCanvas`,
+-- which first has to figure out *which* step a click landed on).
+viewStepAndScroll :: Int -> H.HalogenM State Action Slots Void Aff Unit
+viewStepAndScroll i = do
+  H.modify_ _ { viewedStep = Just i }
+  drawCanvas
+  drawHistoryCanvas
+  H.liftEffect (DomFx.scrollIntoView ("progress-cell-" <> show i))
+
+-- Only while nothing is manually selected (`viewedStep == Nothing`, i.e.
+-- still "following" — see `ToggleTrackHistory`/`renderProgress`): keep the
+-- newest square in view as new steps arrive, so the history area tracks
+-- the live run instead of needing a manual scroll.
+scrollToLatestIfFollowing :: H.HalogenM State Action Slots Void Aff Unit
+scrollToLatestIfFollowing = do
+  st <- H.get
+  case st.viewedStep of
+    Just _  -> pure unit
+    Nothing ->
+      case Array.length st.progressLog of
+        0 -> pure unit
+        n -> H.liftEffect (DomFx.scrollIntoView ("progress-cell-" <> show (n - 1)))
 
 -- Applied on every Result W/H change: crops or pads the *currently
 -- displayed* grid to the new size right away (top-left anchored — new area
@@ -745,8 +799,11 @@ applySampleDefaults = do
 startRun :: String -> H.HalogenM State Action Slots Void Aff Unit
 startRun mode = do
   st <- H.get
-  H.modify_ _
-    { running = true, status = Stepped, viewedStep = Nothing
+  H.modify_ \s -> s
+    { running = true, status = Stepped
+    -- Re-enables auto-follow (see `highlightedStep`/`scrollToLatestIfFollowing`)
+    -- unless the user explicitly locked their manual selection in place.
+    , viewedStep = if s.lockSelectedStep then s.viewedStep else Nothing
     , untilSolvedRunning = mode == "untilSolved"
     }
   sendToWorkerEnsuring (runCommand st mode)
@@ -830,6 +887,7 @@ renderHistoryCanvasEl st =
     , HP.width 512
     , HP.height 512
     , HP.style (if st.trackHistory && not (Array.null st.progressLog) then "" else "display:none;")
+    , HE.onClick ClickHistoryCanvas
     ]
 
 -- File upload: pick a small (<=32x32) image to use as the pattern source
@@ -1121,6 +1179,15 @@ renderRunControls st =
             ]
         , HH.text " Track history"
         ]
+    , HH.label
+        [ HP.class_ (H.ClassName "toggle-row") ]
+        [ HH.input
+            [ HP.type_ HP.InputCheckbox
+            , HP.checked st.lockSelectedStep
+            , HE.onChecked \_ -> ToggleLockSelectedStep
+            ]
+        , HH.text " Lock selected step"
+        ]
     ]
 
 -- Per-iteration step counts — one number per history row (see
@@ -1201,18 +1268,18 @@ renderProgress st =
     else
       HH.div
         [ HP.class_ (H.ClassName "history-block") ]
-        (map (renderHistoryRow st.viewedStep) rows)
+        (map (renderHistoryRow (highlightedStep st)) rows)
 
 renderHistoryRow :: Maybe Int -> HistoryRow -> H.ComponentHTML Action Slots Aff
-renderHistoryRow viewedStep row =
+renderHistoryRow highlighted row =
   HH.div
     [ HP.class_ (H.ClassName "history-row") ]
     ( Array.replicate row.startColumn (HH.div [ HP.class_ (H.ClassName "progress-spacer") ] [])
-      <> map (\(Tuple i p) -> renderProgressCell viewedStep i p) row.cells
+      <> map (\(Tuple i p) -> renderProgressCell highlighted i p) row.cells
     )
 
 renderProgressCell :: Maybe Int -> Int -> WP.Progress -> H.ComponentHTML Action Slots Aff
-renderProgressCell viewedStep i p =
+renderProgressCell highlighted i p =
   let percent    = if p.totalCells > 0 then Int.toNumber p.solvedTotal / Int.toNumber p.totalCells else 0.0
       lightness  = 15 + Int.floor (percent * 45.0)
       -- A full restart (`restarted`) is always triggered by a contradiction,
@@ -1220,7 +1287,7 @@ renderProgressCell viewedStep i p =
       -- `status`/`running` keep tracking the run that continues past it) —
       -- so the cell still needs to read as red, not green, at that step.
       isContra   = p.kind == "contradiction" || p.restarted
-      isViewed   = viewedStep == Just i
+      isViewed   = highlighted == Just i
       bg         = if isContra then "#ff4444" else "hsl(130, 55%, " <> show lightness <> "%)"
       extraClass =
         (if p.restarted then " restarted" else "")
@@ -1235,7 +1302,8 @@ renderProgressCell viewedStep i p =
         <> (if isContra then " — contradiction" else "")
   in
   HH.div
-    [ HP.class_ (H.ClassName ("progress-cell" <> extraClass))
+    [ HP.id ("progress-cell-" <> show i)
+    , HP.class_ (H.ClassName ("progress-cell" <> extraClass))
     , HP.style ("background:" <> bg <> ";")
     , HP.title tip
     , HE.onClick \_ -> ViewStep i
@@ -1574,7 +1642,10 @@ handleAction = case _ of
     st <- H.get
     case st.catalog of
       Nothing -> pure unit
-      Just _  -> sendToWorkerEnsuring (stepCommand st)
+      Just _  -> do
+        -- Same re-enable-auto-follow-unless-locked rule as `startRun`.
+        unless st.lockSelectedStep (H.modify_ _ { viewedStep = Nothing })
+        sendToWorkerEnsuring (stepCommand st)
 
   ResetWave -> do
     st <- H.get
@@ -1649,6 +1720,7 @@ handleAction = case _ of
         }
       drawCanvas
       drawHistoryCanvas
+      scrollToLatestIfFollowing
 
   TogglePatterns ->
     H.modify_ \st -> st { showPats = not st.showPats }
@@ -1659,10 +1731,7 @@ handleAction = case _ of
   ToggleBacktracking ->
     H.modify_ \st -> st { useBacktracking = not st.useBacktracking }
 
-  ViewStep i -> do
-    H.modify_ _ { viewedStep = Just i }
-    drawCanvas
-    drawHistoryCanvas
+  ViewStep i -> viewStepAndScroll i
 
   SetPatternSize n ->
     H.modify_ _ { patternSize = n }
@@ -1689,6 +1758,26 @@ handleAction = case _ of
       , viewedStep   = if st.trackHistory then Nothing else st.viewedStep
       }
     drawHistoryCanvas
+
+  ToggleLockSelectedStep ->
+    H.modify_ \st -> st { lockSelectedStep = not st.lockSelectedStep }
+
+  -- Approximate: re-derives the exact same layout `drawHistoryCanvasEffect`
+  -- last painted (`historyCanvasLayout`), scales the click's canvas-local
+  -- position from its displayed CSS size up to the canvas's internal
+  -- 512×512 resolution, and picks whichever cell's row/column that lands
+  -- in — a no-op if the click misses every cell (e.g. past the last step
+  -- in its row, in the empty margin `historyCanvasLayout` doesn't paint).
+  ClickHistoryCanvas ev -> do
+    st <- H.get
+    for_ (historyCanvasLayout st) \{ rows, cellW, cellH } -> do
+      { x: offX, y: offY } <- H.liftEffect (DomFx.mouseOffset ev)
+      let scale = 512.0 / 256.0 -- displayed (.history-canvas CSS size) -> internal resolution
+          rowIdx = Int.floor ((offY * scale) / cellH)
+          col    = Int.floor ((offX * scale) / cellW)
+      for_ (Array.index rows rowIdx) \row ->
+        for_ (Array.index row.cells (col - row.startColumn)) \(Tuple i _) ->
+          viewStepAndScroll i
 
   ToggleRotations ->
     H.modify_ \st -> st { useRotations = not st.useRotations }
