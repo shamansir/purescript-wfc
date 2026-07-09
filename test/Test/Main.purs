@@ -806,47 +806,59 @@ main = runSpecAndExitProcess [consoleReporter] do
 
     describe "expandRule — one declared rule expanded across rotation AND reflection" do
 
-      it "a fully asymmetric (SymF) pair produces 8 facts, 2 per cardinal direction" do
+      -- `expandRule` itself only ever builds `DirL`/`DirD` facts directly
+      -- (a faithful port of `SimpleTiledModel.cs`'s `densePropagator[0]`/
+      -- `[1]`) — `DirR`/`DirU` are never built here, they fall out of
+      -- `buildTileSet`'s existing opposite-direction reciprocal insert on
+      -- every fact (mirroring the original's `densePropagator[2]`/`[3]`
+      -- transpose-fill). So these tests check `expandRule`'s raw output
+      -- for `DirL`/`DirD` only; the "buildTileSet" tests below check the
+      -- full picture (including the emergent `DirR`/`DirU` coverage) via
+      -- `lookupNeighbors`.
+
+      it "a fully asymmetric (SymF) pair produces 8 facts, 4 DirL + 4 DirD" do
         let symOf _ = SymF
             rule = { leftName: "a", leftRot: 0, rightName: "b", rightRot: 0 }
             facts = TS.expandRule symOf rule
         Array.length facts `shouldEqual` 8
-        Array.sort (map _.dir facts) `shouldEqual` Array.sort (allDirections <> allDirections)
+        Array.sort (map _.dir facts) `shouldEqual` [ DirL, DirL, DirL, DirL, DirD, DirD, DirD, DirD ]
 
-      it "the mirrored half swaps left/right and reflects each side's orientation" do
-        -- SymF's `reflectIndex` is `i < 4 ? i + 4 : i - 4` — a real, non-identity
-        -- permutation — so the reflected base fact really is a different pair
-        -- (right-then-left, both sides bumped into the mirrored half 4..7),
-        -- not a duplicate of the plain-rotation facts.
+      it "the reflect-derived facts are real, distinct pairs (SymF has no symmetry to collapse them)" do
         let symOf _ = SymF
             rule = { leftName: "a", leftRot: 0, rightName: "b", rightRot: 0 }
             facts = TS.expandRule symOf rule
-            atDirR = Array.filter (\f -> f.dir == DirR) facts
-        atDirR `shouldEqual`
-          [ { dir: DirR, left: TS.TileInstance { name: "a", orientation: 0 }, right: TS.TileInstance { name: "b", orientation: 0 } }
-          , { dir: DirR, left: TS.TileInstance { name: "b", orientation: 4 }, right: TS.TileInstance { name: "a", orientation: 4 } }
+            atDirL = Array.filter (\f -> f.dir == DirL) facts
+            ti n o = TS.TileInstance { name: n, orientation: o }
+        atDirL `shouldEqual`
+          [ { dir: DirL, left: ti "b" 0, right: ti "a" 0 }
+          , { dir: DirL, left: ti "b" 6, right: ti "a" 6 }
+          , { dir: DirL, left: ti "a" 4, right: ti "b" 4 }
+          , { dir: DirL, left: ti "a" 2, right: ti "b" 2 }
           ]
 
       it "SymL's mirror image is a different rotation of itself, not a no-op" do
         -- A straight ("I") track next to a corner ("L") turn — same shape
         -- as Circuit.xml's actual `<neighbor left="track" right="turn"/>`.
         -- The corner's reflection lands on one of its own *other* rotations
-        -- (`reflectIndex SymL 0 == 1`), so the mirrored half is genuinely
-        -- new information the solver needs — this is the exact gap that
-        -- caused Circuit's roads to break: losing it meant losing real,
-        -- valid corner/junction adjacencies (track's own reflection is a
-        -- no-op, `reflectIndex SymI 0 == 0`, so only `turn`'s side changes).
+        -- (`reflectIndex SymL 0 == 1`), so the reflect-derived facts touch
+        -- `turn`'s orientations 1 and 2 here too (not just the 0/1/2/3 a
+        -- plain rotation sweep alone would already reach) — this richer,
+        -- per-direction coverage is the exact gap that caused Circuit's
+        -- roads to break.
         let symOf "track" = SymI
             symOf _         = SymL
             rule = { leftName: "track", leftRot: 0, rightName: "turn", rightRot: 0 }
             facts = TS.expandRule symOf rule
-            atDirR = Array.filter (\f -> f.dir == DirR) facts
-        atDirR `shouldEqual`
-          [ { dir: DirR, left: TS.TileInstance { name: "track", orientation: 0 }, right: TS.TileInstance { name: "turn", orientation: 0 } }
-          , { dir: DirR, left: TS.TileInstance { name: "turn", orientation: 1 }, right: TS.TileInstance { name: "track", orientation: 0 } }
+            atDirL = Array.filter (\f -> f.dir == DirL) facts
+            ti n o = TS.TileInstance { name: n, orientation: o }
+        atDirL `shouldEqual`
+          [ { dir: DirL, left: ti "turn" 0, right: ti "track" 0 }
+          , { dir: DirL, left: ti "turn" 3, right: ti "track" 0 }
+          , { dir: DirL, left: ti "track" 0, right: ti "turn" 1 }
+          , { dir: DirL, left: ti "track" 0, right: ti "turn" 2 }
           ]
 
-      it "SymX never changes orientation, in any of the 4 rotations" do
+      it "SymX never changes orientation, in any of the facts" do
         let symOf _ = SymX
             rule = { leftName: "empty", leftRot: 0, rightName: "empty", rightRot: 0 }
             facts = TS.expandRule symOf rule
@@ -854,15 +866,15 @@ main = runSpecAndExitProcess [consoleReporter] do
           f.left `shouldEqual` TS.TileInstance { name: "empty", orientation: 0 }
           f.right `shouldEqual` TS.TileInstance { name: "empty", orientation: 0 }
 
-      it "SymI alternates orientation 0/1 every 90°, cycling every 180°" do
+      it "SymI (reflection-symmetric) still only ever touches orientations 0/1" do
         let symOf _ = SymI
             rule = { leftName: "track", leftRot: 0, rightName: "wire", rightRot: 0 }
             facts = TS.expandRule symOf rule
-            leftAt dir = _.left <$> Array.find (\f -> f.dir == dir) facts
-        leftAt DirR `shouldEqual` Just (TS.TileInstance { name: "track", orientation: 0 })
-        leftAt DirD `shouldEqual` Just (TS.TileInstance { name: "track", orientation: 1 })
-        leftAt DirL `shouldEqual` Just (TS.TileInstance { name: "track", orientation: 0 })
-        leftAt DirU `shouldEqual` Just (TS.TileInstance { name: "track", orientation: 1 })
+        for_ facts \f -> do
+          let TS.TileInstance l = f.left
+              TS.TileInstance r = f.right
+          l.orientation `shouldSatisfy` (\o -> o == 0 || o == 1)
+          r.orientation `shouldSatisfy` (\o -> o == 0 || o == 1)
 
     describe "buildTileSet — PatternCatalog/AdjacencyRules from a TileSetDef" do
 
@@ -902,6 +914,32 @@ main = runSpecAndExitProcess [consoleReporter] do
             Array.elem bp (lookupNeighbors built.rules DirR cp) `shouldEqual` true
             Array.elem cp (lookupNeighbors built.rules DirL bp) `shouldEqual` true
           _ -> fail "expected both blank@0 and corner@0 to be in the built index"
+
+      it "a single declared corner rule reaches a pairing a plain rotation sweep alone would miss" do
+        -- The regression this whole Circuit.xml investigation was about.
+        -- The old (rotation-only) expansion of `<neighbor left="track"
+        -- right="turn"/>` put `turn@2` (not `turn@1`) on `track@0`'s DirL
+        -- side (reached via rotating the whole declared pair 180°). The
+        -- reflection-derived facts add `turn@1` there too — real
+        -- information a corner tile needs that rotation alone can't
+        -- supply, since a corner's mirror image is a genuinely different
+        -- orientation of itself (`reflectIndex SymL 0 == 1`, not 0).
+        let roadDef :: TS.TileSetDef
+            roadDef =
+              { unique: false
+              , tiles:
+                  [ { name: "track", symmetry: SymI, weight: 1.0 }
+                  , { name: "turn", symmetry: SymL, weight: 1.0 }
+                  ]
+              , neighbors: [ { leftName: "track", leftRot: 0, rightName: "turn", rightRot: 0 } ]
+              , subsets: []
+              }
+            roadBuilt = TS.buildTileSet roadDef
+            pidOf name o = Map.lookup (TS.TileInstance { name, orientation: o }) roadBuilt.index
+        case Tuple (pidOf "track" 0) (pidOf "turn" 1) of
+          Tuple (Just t0) (Just c1) ->
+            Array.elem c1 (lookupNeighbors roadBuilt.rules DirL t0) `shouldEqual` true
+          _ -> fail "expected track@0 and turn@1 to both be in the built index"
 
     describe "WFC.TileSet.Xml — parsing the real Knots.xml tileset" do
 

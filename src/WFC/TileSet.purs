@@ -23,7 +23,7 @@ import WFC.Catalog (Accum, PatternCatalog, finalize)
 import WFC.Direction (Direction(..), opposite)
 import WFC.Pattern (Pattern(..), PatternId(..))
 import WFC.Rules (AdjacencyRules(..))
-import WFC.TileSet.Symmetry (Symmetry(..), distinctOrientations, reflectIndex, rotateIndexBy)
+import WFC.TileSet.Symmetry (Symmetry(..), distinctOrientations, reflectIndex, rotateIndex, rotateIndexBy)
 
 -- One specific oriented tile — a base tile name plus which of its own
 -- `cardinality`-many distinct orientations this is (see
@@ -92,44 +92,65 @@ type RuleFact =
 
 -- Expand one declared (always `DirR`-based) neighbor rule into every
 -- adjacency fact implied by the full 8-element symmetry group of the
--- square (4 rotations × mirrored-or-not) acting on the declared 1×2 patch
--- — not just the 4 pure rotations. Mirroring the patch horizontally
--- reverses which tile is "left"/"right" (a flip swaps left and right) and
--- reflects each tile's own picture (`reflectIndex`), giving a second base
--- fact (`left`/`right` swapped, each side's declared rotation reflected)
--- that then gets the same 4-way rotation treatment as the original —
--- `rotateAll` is that shared "rotate this (left, right) pair 0/90/180/270°"
--- step, called once per base fact.
+-- square (4 rotations × mirrored-or-not) acting on the declared 1×2 patch.
 --
--- Skipping the mirrored half (as an earlier version of this function did)
--- is a no-op for `X`/`I`/`\` — their `reflectIndex` is the identity or
+-- This is a direct, faithful transliteration of `SimpleTiledModel.cs`'s
+-- `densePropagator` construction — NOT a re-derivation from "rotate the
+-- whole pair 0/90/180/270°, then again mirrored" (an earlier version of
+-- this function tried that "cleaner" reformulation and got the axis/
+-- ordering structure subtly wrong: rotating a horizontal pair 180° does
+-- *not* leave the pair pointing the same way, it reverses which side is
+-- "left" — {identity, reflect} alone is not the right pairing for a fixed
+-- axis, {identity, rotate180, reflect, reflect+rotate180} is). Only 2 of
+-- the 4 cardinal directions are ever built directly (`DirL` from the
+-- declared left/right pair, `DirD` from the same pair pre-rotated 90°);
+-- `DirR`/`DirU` come for free from `buildTileSet`'s existing
+-- opposite-direction reciprocal insert on every fact, exactly mirroring
+-- the original's `densePropagator[2]`/`[3]` transpose-fill.
+--
+-- Skipping the reflect-derived facts entirely (as an even earlier version
+-- did) is a no-op for `X`/`I`/`\` — their `reflectIndex` is the identity or
 -- coincides with a rotation they already have — but silently drops real,
 -- valid adjacencies for `L`/`T`, whose mirror image is a genuinely
 -- different orientation. Any tileset leaning on `L`/`T` tiles for
 -- continuity (e.g. corner/junction pieces in a road or pipe network) ends
 -- up with an incomplete rule set and visible discontinuities as a result.
--- This mirrors `SimpleTiledModel.cs`'s own `densePropagator` construction,
--- which builds exactly these 8 variants per declared rule via its `a`
--- (rotate)/`b` (reflect) tables.
 expandRule :: (String -> Symmetry) -> NeighborRule -> Array RuleFact
 expandRule symOf rule =
-  rotateAll rule.leftName leftSym rule.leftRot rule.rightName rightSym rule.rightRot
-  <> rotateAll rule.rightName rightSym (reflectIndex rightSym rule.rightRot)
-       rule.leftName leftSym (reflectIndex leftSym rule.leftRot)
+  [ { dir: DirL, left: ti rule.rightName r,  right: ti rule.leftName l   }
+  , { dir: DirL, left: ti rule.rightName r6, right: ti rule.leftName l6  }
+  , { dir: DirL, left: ti rule.leftName l4,  right: ti rule.rightName r4 }
+  , { dir: DirL, left: ti rule.leftName l2,  right: ti rule.rightName r2 }
+  , { dir: DirD, left: ti rule.rightName u,  right: ti rule.leftName d   }
+  , { dir: DirD, left: ti rule.leftName d6,  right: ti rule.rightName u6 }
+  , { dir: DirD, left: ti rule.rightName u4, right: ti rule.leftName d4  }
+  , { dir: DirD, left: ti rule.leftName d2,  right: ti rule.rightName u2 }
+  ]
   where
   leftSym = symOf rule.leftName
   rightSym = symOf rule.rightName
+  ti name orientation = TileInstance { name, orientation }
 
-  rotateAll lName lSym lRot rName rSym rRot =
-    map toFact (Array.range 0 3)
-    where
-    toFact k =
-      { dir: applyN k rotateDirCW DirR
-      , left: TileInstance { name: lName, orientation: rotateIndexBy lSym k lRot }
-      , right: TileInstance { name: rName, orientation: rotateIndexBy rSym k rRot }
-      }
+  l = rule.leftRot
+  r = rule.rightRot
+  d = rotateIndex leftSym l
+  u = rotateIndex rightSym r
 
-  applyN n f x = Array.foldl (\acc _ -> f acc) x (Array.replicate n unit)
+  l2 = rotateIndexBy leftSym 2 l
+  l4 = reflectIndex leftSym l
+  l6 = reflectIndex leftSym l2
+
+  r2 = rotateIndexBy rightSym 2 r
+  r4 = reflectIndex rightSym r
+  r6 = reflectIndex rightSym r2
+
+  d2 = rotateIndexBy leftSym 2 d
+  d4 = reflectIndex leftSym d
+  d6 = reflectIndex leftSym d2
+
+  u2 = rotateIndexBy rightSym 2 u
+  u4 = reflectIndex rightSym u
+  u6 = reflectIndex rightSym u2
 
 -- Every distinct oriented tile in the set, alongside its (shared, per-base-tile) weight.
 tileInstances :: TileSetDef -> Array (Tuple TileInstance Number)
