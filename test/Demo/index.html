@@ -149,6 +149,11 @@
     }
 
     /* ---- Step history: one row per cycle (restart or backtrack) ---- */
+    .history-canvas {
+      width: 256px;
+      height: 256px;
+    }
+
     .history-block {
       display: flex;
       flex-direction: column;
@@ -171,20 +176,32 @@
 
     .progress-spacer {
       flex: 0 0 auto;
-      width: 8px;
-      height: 20px;
+      width: 26px;
+      height: 30px;
     }
 
     .progress-cell {
       flex: 0 0 auto;
-      width: 8px;
-      height: 20px;
-      border-radius: 1px;
+      width: 26px;
+      height: 30px;
+      border-radius: 2px;
       cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      font-size: 8px;
+      line-height: 1.3;
+      color: #0d1117;
+    }
+
+    .progress-cell-percent {
+      opacity: 0.75;
     }
 
     .progress-cell:hover {
-      transform: scaleY(1.15);
+      transform: scaleY(1.1);
     }
 
     .progress-cell.restarted {
@@ -192,6 +209,7 @@
     }
 
     .progress-cell.contradiction {
+      color: #ffffff;
       box-shadow: inset 0 0 0 1px #ffffff;
     }
 

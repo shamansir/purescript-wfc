@@ -5,7 +5,7 @@ import Prelude
 import Control.Alternative (guard)
 import Data.Array as Array
 import Data.Either (Either(..))
-import Data.Foldable (for_)
+import Data.Foldable (for_, maximum)
 import Data.Int as Int
 import Data.Map (Map)
 import Data.Map as Map
@@ -92,6 +92,7 @@ type State =
   , tilesetImageCache :: Map String Canvas.CanvasImageSource -- preloaded per-tile PNGs, keyed by src URL
   , blankCellSnapshot :: Maybe WP.CellSnapshot -- the fully-uncollapsed cell for the active catalog; built alongside it at Extract time, used to fill new area on a live resize
   , fixOutputSize     :: Boolean -- when true, switching samples keeps Result W/H instead of resetting to the new sample's own defaults
+  , trackHistory      :: Boolean -- when false, WorkerMsg stops appending to progressLog and the history squares/canvas stay hidden — off saves memory/redraw cost on a long run
   }
 
 -- Which of the demo's 4 sample sources is currently selected, derived
@@ -134,6 +135,7 @@ data Action
   | SetOutW Int
   | SetOutH Int
   | ToggleFixOutputSize
+  | ToggleTrackHistory
   | ToggleRotations
   | ToggleMirror
   | ToggleInputPeriodic
@@ -183,6 +185,7 @@ initialState =
   , tilesetImageCache: Map.empty
   , blankCellSnapshot: Nothing
   , fixOutputSize:     false
+  , trackHistory:      true
   }
 
 -- ---------------------------------------------------------------------------
@@ -591,6 +594,63 @@ drawCanvas = do
   st <- H.get
   H.liftEffect $ drawCanvasEffect st
 
+-- Miniature bitmap of the same step history the HTML squares show (see
+-- `buildHistoryRows`/`renderProgress`) — one filled square per step,
+-- positioned/colored identically (row = which restart/backtrack cycle,
+-- column = position within it, red for a contradiction, a blue outline for
+-- the currently-viewed step), just small enough to see the whole run's
+-- shape at a glance instead of scrolling through it. Fixed 512×512 canvas;
+-- cells default to 4×4px but each axis shrinks independently (not kept
+-- square) once its own extent would otherwise overflow — most runs are one
+-- long row, so keeping cell height at a full 4px while only the width
+-- shrinks is what keeps those readable as a bar instead of a hairline.
+drawHistoryCanvasEffect :: State -> Effect Unit
+drawHistoryCanvasEffect st = do
+  mCanvas <- Canvas.getCanvasElementById "history-canvas"
+  case mCanvas of
+    Nothing     -> pure unit
+    Just canvas -> do
+      ctx <- Canvas.getContext2D canvas
+      let cw = 512.0
+          ch = 512.0
+      Canvas.clearRect ctx { x: 0.0, y: 0.0, width: cw, height: ch }
+      Canvas.setFillStyle ctx "#161b22"
+      Canvas.fillRect ctx { x: 0.0, y: 0.0, width: cw, height: ch }
+      when st.trackHistory do
+        let rows = buildHistoryRows st.progressLog
+        when (not (Array.null rows)) do
+          let maxCols  = max 1 (fromMaybe 1 (maximum (map (\r -> r.startColumn + Array.length r.cells) rows)))
+              rowCount = Array.length rows
+              -- Independent per-axis scaling, not a single shared (square)
+              -- cell size: a run that's overwhelmingly one long row (the
+              -- common case — most runs never backtrack) should still get
+              -- full-height 4px-tall cells even once its *width* has to
+              -- shrink well below 4px to fit; tying both axes to the same
+              -- factor turned a 397-step single-row run into a near-invisible
+              -- 1px sliver instead of a readable bar.
+              cellW = min 4.0 (cw / Int.toNumber maxCols)
+              cellH = min 4.0 (ch / Int.toNumber rowCount)
+          for_ (Array.mapWithIndex Tuple rows) \(Tuple rowIdx row) ->
+            for_ (Array.mapWithIndex Tuple row.cells) \(Tuple k (Tuple i p)) -> do
+              let col      = row.startColumn + k
+                  x        = Int.toNumber col * cellW
+                  y        = Int.toNumber rowIdx * cellH
+                  percent  = if p.totalCells > 0 then Int.toNumber p.solvedTotal / Int.toNumber p.totalCells else 0.0
+                  lightness = 15 + Int.floor (percent * 45.0)
+                  isContra = p.kind == "contradiction" || p.restarted
+                  color    = if isContra then "#ff4444" else "hsl(130, 55%, " <> show lightness <> "%)"
+              Canvas.setFillStyle ctx color
+              Canvas.fillRect ctx { x, y, width: cellW, height: cellH }
+              when (st.viewedStep == Just i) do
+                Canvas.setStrokeStyle ctx "#58a6ff"
+                Canvas.setLineWidth ctx 1.0
+                Canvas.strokeRect ctx { x, y, width: cellW, height: cellH }
+
+drawHistoryCanvas :: H.HalogenM State Action Slots Void Aff Unit
+drawHistoryCanvas = do
+  st <- H.get
+  H.liftEffect $ drawHistoryCanvasEffect st
+
 -- Applied on every Result W/H change: crops or pads the *currently
 -- displayed* grid to the new size right away (top-left anchored — new area
 -- fills with the fully-uncollapsed cell, same as a freshly-extracted
@@ -751,7 +811,25 @@ renderRunPanel st =
     [ HP.class_ (H.ClassName "run-panel") ]
     [ renderRunControls st
     , renderStats st
+    , renderHistoryCanvasEl st
     , renderProgress st
+    ]
+
+-- Always mounted, never conditionally added/removed from the DOM — the
+-- imperative `drawHistoryCanvasEffect` (like `drawCanvas` for `wfc-canvas`)
+-- needs `getCanvasElementById` to keep finding the same element every
+-- redraw. Hidden via plain CSS instead when there's nothing to show yet
+-- (`trackHistory` off, or no steps taken), same visual effect as the HTML
+-- squares' own `renderProgress` hiding itself, without the mount-timing
+-- risk of a vdom-conditional canvas.
+renderHistoryCanvasEl :: State -> H.ComponentHTML Action Slots Aff
+renderHistoryCanvasEl st =
+  HH.canvas
+    [ HP.id "history-canvas"
+    , HP.class_ (H.ClassName "history-canvas")
+    , HP.width 512
+    , HP.height 512
+    , HP.style (if st.trackHistory && not (Array.null st.progressLog) then "" else "display:none;")
     ]
 
 -- File upload: pick a small (<=32x32) image to use as the pattern source
@@ -1034,6 +1112,15 @@ renderRunControls st =
             ]
         , HH.text " Use backtracking"
         ]
+    , HH.label
+        [ HP.class_ (H.ClassName "toggle-row") ]
+        [ HH.input
+            [ HP.type_ HP.InputCheckbox
+            , HP.checked st.trackHistory
+            , HE.onChecked \_ -> ToggleTrackHistory
+            ]
+        , HH.text " Track history"
+        ]
     ]
 
 -- Per-iteration step counts — one number per history row (see
@@ -1109,7 +1196,7 @@ renderProgress :: State -> H.ComponentHTML Action Slots Aff
 renderProgress st =
   let rows = buildHistoryRows st.progressLog
   in
-  if Array.null rows
+  if not st.trackHistory || Array.null rows
     then HH.text ""
     else
       HH.div
@@ -1153,7 +1240,9 @@ renderProgressCell viewedStep i p =
     , HP.title tip
     , HE.onClick \_ -> ViewStep i
     ]
-    []
+    [ HH.div [ HP.class_ (H.ClassName "progress-cell-step") ] [ HH.text (show p.step) ]
+    , HH.div [ HP.class_ (H.ClassName "progress-cell-percent") ] [ HH.text (show (Int.floor (percent * 100.0)) <> "%") ]
+    ]
 
 renderPatterns :: State -> H.ComponentHTML Action Slots Aff
 renderPatterns st =
@@ -1463,6 +1552,7 @@ handleAction = case _ of
       , blankCellSnapshot = Just (WP.blankCellSnapshot cat)
       }
     drawCanvas
+    drawHistoryCanvas
     -- Preload the tileset's tile images in the background, if this is an
     -- XML tileset — flat colors (the palette fallback) keep being used
     -- until an image lands in the cache, and every redraw re-checks the
@@ -1510,6 +1600,7 @@ handleAction = case _ of
           _                         -> st.displayGrid
       }
     drawCanvas
+    drawHistoryCanvas
 
   RunOnce        -> startRun "once"
   RunUntilSolved -> startRun "untilSolved"
@@ -1532,7 +1623,7 @@ handleAction = case _ of
       -- per-step duration is the delta from the previous cumulative value,
       -- not `msg.elapsedMs` itself.
       H.modify_ \s -> s
-        { progressLog = Array.snoc s.progressLog msg
+        { progressLog = if s.trackHistory then Array.snoc s.progressLog msg else s.progressLog
         , displayGrid = Just msg.grid
         -- A "contradiction" in "Run until solved" always auto-restarts
         -- (the worker sets `restarted` on that very message when it will),
@@ -1557,6 +1648,7 @@ handleAction = case _ of
         , stepBackedOut = if msg.continuous then s.stepBackedOut else msg.backedOut
         }
       drawCanvas
+      drawHistoryCanvas
 
   TogglePatterns ->
     H.modify_ \st -> st { showPats = not st.showPats }
@@ -1570,6 +1662,7 @@ handleAction = case _ of
   ViewStep i -> do
     H.modify_ _ { viewedStep = Just i }
     drawCanvas
+    drawHistoryCanvas
 
   SetPatternSize n ->
     H.modify_ _ { patternSize = n }
@@ -1584,6 +1677,18 @@ handleAction = case _ of
 
   ToggleFixOutputSize ->
     H.modify_ \st -> st { fixOutputSize = not st.fixOutputSize }
+
+  -- Turning tracking off clears whatever was already recorded (the point
+  -- is to stop paying for it, on a long run) and hides the squares/canvas;
+  -- turning it back on just starts recording fresh from here — it doesn't
+  -- try to reconstruct what happened while it was off.
+  ToggleTrackHistory -> do
+    H.modify_ \st -> st
+      { trackHistory = not st.trackHistory
+      , progressLog  = if st.trackHistory then [] else st.progressLog
+      , viewedStep   = if st.trackHistory then Nothing else st.viewedStep
+      }
+    drawHistoryCanvas
 
   ToggleRotations ->
     H.modify_ \st -> st { useRotations = not st.useRotations }
