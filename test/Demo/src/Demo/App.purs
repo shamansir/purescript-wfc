@@ -452,8 +452,19 @@ customImageFrom loaded =
 -- connections look visually broken in the Patterns/Rules panels and on the
 -- solved canvas (orientation 2 is 180° either way, so it was never affected
 -- — this is why the discontinuities were inconsistent rather than total).
-orientationTransform :: Int -> { rotationDeg :: Int, mirrored :: Boolean }
-orientationTransform idx = { rotationDeg: -((idx `mod` 4) * 90), mirrored: idx >= 4 }
+-- `unique` tilesets (e.g. Summer.xml) load a separate already-correctly-
+-- oriented image file per orientation (see `tileImageSrc` below) — no
+-- rotation/mirror needed (or wanted) on top of that, so this is the
+-- identity transform whenever `unique` is true, regardless of `idx`.
+-- Missing this was Summer's own bug: every tile's picture was rotated
+-- *twice* — once for real by whichever "name N.png" got loaded, then again
+-- by this transform on top of it — so individual tiles' contents were
+-- right but their edges landed in the wrong place relative to their
+-- neighbors, the exact "grouped correctly, but sides don't match" symptom.
+orientationTransform :: Boolean -> Int -> { rotationDeg :: Int, mirrored :: Boolean }
+orientationTransform unique idx
+  | unique    = { rotationDeg: 0, mirrored: false }
+  | otherwise = { rotationDeg: -((idx `mod` 4) * 90), mirrored: idx >= 4 }
 
 -- Where a tile+orientation's PNG lives: `unique` tilesets (e.g. Summer.xml)
 -- have a separate image per orientation ("cliff 0.png".."cliff 3.png");
@@ -499,7 +510,7 @@ tileImageForTile :: State -> WP.TileRef -> Maybe (Tuple String String)
 tileImageForTile st ref = do
   dir <- st.xmlTilesetDir
   def <- st.customTileSet
-  let t = orientationTransform ref.orientation
+  let t = orientationTransform def.unique ref.orientation
       src = tileImageSrc dir def.unique ref
       -- CSS composes `"A B"` as `A(B(point))` — B (rightmost/last-listed)
       -- applies to the image first. `drawTileImage` below rotates the raw
@@ -541,9 +552,9 @@ imageDrawMode st =
 -- Draw one tile image into a cell's square, rotated/mirrored per its
 -- orientation — `orientationTransform` (see above) already reduces any
 -- symmetry class down to "rotate N*90°, optionally mirrored first".
-drawTileImage :: Canvas.Context2D -> Canvas.CanvasImageSource -> Number -> Number -> Number -> Number -> Int -> Effect Unit
-drawTileImage ctx img x y w h orientation = do
-  let t = orientationTransform orientation
+drawTileImage :: Canvas.Context2D -> Canvas.CanvasImageSource -> Number -> Number -> Number -> Number -> Boolean -> Int -> Effect Unit
+drawTileImage ctx img x y w h unique orientation = do
+  let t = orientationTransform unique orientation
   Canvas.save ctx
   Canvas.translate ctx { translateX: x + w / 2.0, translateY: y + h / 2.0 }
   when t.mirrored (Canvas.scale ctx { scaleX: -1.0, scaleY: 1.0 })
@@ -587,10 +598,10 @@ drawCanvasEffect st = do
                     guard (cell.collapsed && not cell.contradiction)
                     ref <- Array.head cell.values >>= im.tileOf
                     img <- Map.lookup (tileImageSrc im.dir im.unique ref) st.tilesetImageCache
-                    pure (Tuple img ref.orientation)
+                    pure { img, unique: im.unique, orientation: ref.orientation }
               case tileImage of
-                Just (Tuple img orientation) ->
-                  drawTileImage ctx img px py cellW cellH orientation
+                Just { img, unique, orientation } ->
+                  drawTileImage ctx img px py cellW cellH unique orientation
                 Nothing -> do
                   let color = WP.cellColor sampleDef.palette cell
                   Canvas.setFillStyle ctx color
