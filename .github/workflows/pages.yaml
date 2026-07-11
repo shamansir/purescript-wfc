@@ -29,11 +29,20 @@ jobs:
       - name: Test
         run: nix develop --command bash -c "spago test"
 
-      - name: Build & bundle demo
+      - name: Build
+        run: nix develop --command bash -c "spago build --json-errors"
+
+      # `--outfile` is resolved relative to spago's own source-directory
+      # prefix for the package, not the shell's cwd — running this from the
+      # repo root with `--outfile test/Demo/index.js` silently double-nests
+      # it at test/Demo/test/Demo/index.js instead. `cd`ing into test/Demo
+      # first (via working-directory) and using a bare outfile is the
+      # combination that actually places the bundle where index.html expects it.
+      - name: Bundle demo
+        working-directory: test/Demo
         run: |
-          nix develop --command bash -c "spago build --json-errors"
-          nix develop --command bash -c "spago bundle --package demo --module Demo.Main --outfile test/Demo/index.js --platform browser"
-          nix develop --command bash -c "spago bundle --package demo --module Demo.Worker --outfile test/Demo/worker.js --platform browser"
+          nix develop --command bash -c "spago bundle --package demo --module Demo.Main --outfile index.js --platform browser"
+          nix develop --command bash -c "spago bundle --package demo --module Demo.Worker --outfile worker.js --platform browser"
 
       # test/Demo already has index.html + relative-path asset dirs
       # (samples/, tilesets/) alongside the two bundles above, so it's
