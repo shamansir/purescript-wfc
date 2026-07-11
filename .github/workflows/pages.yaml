@@ -1,0 +1,54 @@
+name: Deploy WFC Demo to Pages
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # This project's toolchain (purs-unstable/spago-unstable, pinned in
+      # flake.nix) only exists inside the Nix dev shell — no bare purs/spago
+      # calls, see CLAUDE.md.
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Test
+        run: nix develop --command bash -c "spago test"
+
+      - name: Build & bundle demo
+        run: |
+          nix develop --command bash -c "spago build --json-errors"
+          nix develop --command bash -c "spago bundle --package demo --module Demo.Main --outfile test/Demo/index.js --platform browser"
+          nix develop --command bash -c "spago bundle --package demo --module Demo.Worker --outfile test/Demo/worker.js --platform browser"
+
+      # test/Demo already has index.html + relative-path asset dirs
+      # (samples/, tilesets/) alongside the two bundles above, so it's
+      # servable as-is under Pages' project subpath.
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: test/Demo
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
