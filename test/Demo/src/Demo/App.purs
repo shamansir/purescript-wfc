@@ -96,6 +96,8 @@ type State =
   , fixOutputSize     :: Boolean -- when true, switching samples keeps Result W/H instead of resetting to the new sample's own defaults
   , trackHistory      :: Boolean -- when false, WorkerMsg stops appending to progressLog and the history squares/canvas stay hidden — off saves memory/redraw cost on a long run
   , lockSelectedStep  :: Boolean -- when true, Step/Run don't reset viewedStep back to "follow the live step" — the manually-picked step stays selected through further solving
+  , autoScrollHistory :: Boolean -- when false, new steps stop pulling the history squares' scroll position along while following (isolates/avoids that DOM cost on a long run)
+  , lastHistoryDrawMs :: Number -- `msg.elapsedMs` as of the last actual history-canvas redraw; throttles `drawHistoryCanvasEffect` (see `WorkerMsg`), which is O(total history) per call
   }
 
 -- Which of the demo's 4 sample sources is currently selected, derived
@@ -140,6 +142,7 @@ data Action
   | ToggleFixOutputSize
   | ToggleTrackHistory
   | ToggleLockSelectedStep
+  | ToggleAutoScrollHistory
   | ClickHistoryCanvas MouseEvent
   | ToggleRotations
   | ToggleMirror
@@ -192,6 +195,8 @@ initialState =
   , fixOutputSize:     false
   , trackHistory:      true
   , lockSelectedStep:  false
+  , autoScrollHistory: true
+  , lastHistoryDrawMs: 0.0
   }
 
 -- ---------------------------------------------------------------------------
@@ -709,12 +714,13 @@ viewStepAndScroll i = do
 scrollToLatestIfFollowing :: H.HalogenM State Action Slots Void Aff Unit
 scrollToLatestIfFollowing = do
   st <- H.get
-  case st.viewedStep of
-    Just _  -> pure unit
-    Nothing ->
-      case Array.length st.progressLog of
-        0 -> pure unit
-        n -> H.liftEffect (DomFx.scrollIntoView ("progress-cell-" <> show (n - 1)))
+  when st.autoScrollHistory do
+    case st.viewedStep of
+      Just _  -> pure unit
+      Nothing ->
+        case Array.length st.progressLog of
+          0 -> pure unit
+          n -> H.liftEffect (DomFx.scrollIntoView ("progress-cell-" <> show (n - 1)))
 
 -- Applied on every Result W/H change: crops or pads the *currently
 -- displayed* grid to the new size right away (top-left anchored — new area
@@ -1199,6 +1205,15 @@ renderRunControls st =
             ]
         , HH.text " Lock selected step"
         ]
+    , HH.label
+        [ HP.class_ (H.ClassName "toggle-row") ]
+        [ HH.input
+            [ HP.type_ HP.InputCheckbox
+            , HP.checked st.autoScrollHistory
+            , HE.onChecked \_ -> ToggleAutoScrollHistory
+            ]
+        , HH.text " Auto-scroll to current step"
+        ]
     ]
 
 -- Per-iteration step counts — one number per history row (see
@@ -1620,6 +1635,7 @@ handleAction = case _ of
       , totalTime   = 0.0
       , displayGrid = Just (WP.waveToSnapshot cat wave)
       , progressLog = []
+      , lastHistoryDrawMs = 0.0
       , viewedStep  = Nothing
       , extractedWith = Just
           { patternSize: st.patternSize, useRotations: st.useRotations, useMirror: st.useMirror
@@ -1676,6 +1692,7 @@ handleAction = case _ of
       , totalTime   = 0.0
       , viewedStep  = Nothing
       , progressLog = []
+      , lastHistoryDrawMs = 0.0
       , stepBackedOut = false
       , displayGrid = case Tuple st.catalog st.initWave_ of
           Tuple (Just cat) (Just w) -> Just (WP.waveToSnapshot cat w)
@@ -1730,7 +1747,24 @@ handleAction = case _ of
         , stepBackedOut = if msg.continuous then s.stepBackedOut else msg.backedOut
         }
       drawCanvas
-      drawHistoryCanvas
+      -- `drawHistoryCanvasEffect` redraws the *entire* history from scratch
+      -- every call (it has to — cell size depends on the total step count,
+      -- so a newly-added step can shrink every earlier cell too) — O(total
+      -- history) per call, which made a fast/long run visibly slow down
+      -- over time when doing that on every single step. Throttled to a
+      -- redraw at most every 100ms of *solve* time (`msg.elapsedMs`, not
+      -- wall-clock — keeps this deterministic and independent of how fast
+      -- the browser happens to be) instead, except for the handful of
+      -- outcomes worth always showing immediately: a manual Step
+      -- (`not msg.continuous` — a single click shouldn't ever feel
+      -- throttled), the final "done", and a terminal (non-restarting)
+      -- contradiction.
+      st2 <- H.get
+      let forceHistoryDraw = not msg.continuous || msg.kind == "done" || (msg.kind == "contradiction" && not msg.restarted)
+          dueForThrottledDraw = msg.elapsedMs - st2.lastHistoryDrawMs >= 100.0
+      when (st2.trackHistory && (forceHistoryDraw || dueForThrottledDraw)) do
+        drawHistoryCanvas
+        H.modify_ _ { lastHistoryDrawMs = msg.elapsedMs }
       scrollToLatestIfFollowing
 
   TogglePatterns ->
@@ -1766,12 +1800,16 @@ handleAction = case _ of
     H.modify_ \st -> st
       { trackHistory = not st.trackHistory
       , progressLog  = if st.trackHistory then [] else st.progressLog
+      , lastHistoryDrawMs = if st.trackHistory then 0.0 else st.lastHistoryDrawMs
       , viewedStep   = if st.trackHistory then Nothing else st.viewedStep
       }
     drawHistoryCanvas
 
   ToggleLockSelectedStep ->
     H.modify_ \st -> st { lockSelectedStep = not st.lockSelectedStep }
+
+  ToggleAutoScrollHistory ->
+    H.modify_ \st -> st { autoScrollHistory = not st.autoScrollHistory }
 
   -- Approximate: re-derives the exact same layout `drawHistoryCanvasEffect`
   -- last painted (`historyCanvasLayout`), scales the click's canvas-local
