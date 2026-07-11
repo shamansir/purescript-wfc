@@ -1165,12 +1165,18 @@ renderRunControls st =
         [ HE.onClick \_ -> RunOnce
         , HP.disabled (notReady || st.running)
         ]
-        [ HH.text "▶ Run once" ]
+        -- The worker's session survives a Pause (only Reset/Extract discard
+        -- it — see `resetSessionCommand`'s callers), so clicking either Run
+        -- button after one really does continue where it left off rather
+        -- than starting over; "Continue" says so instead of implying a
+        -- fresh run. Reverts once `status` moves off `Stopped` (Reset,
+        -- Extract, or a fresh Run/Step actually landing).
+        [ HH.text (if st.status == Stopped then "▶ Continue once" else "▶ Run once") ]
     , HH.button
         [ HE.onClick \_ -> RunUntilSolved
         , HP.disabled (notReady || st.running)
         ]
-        [ HH.text "⏩ Run until solved" ]
+        [ HH.text (if st.status == Stopped then "⏩ Continue until solved" else "⏩ Run until solved") ]
     , HH.button
         [ HE.onClick \_ -> Stop
         , HP.disabled (not st.running)
