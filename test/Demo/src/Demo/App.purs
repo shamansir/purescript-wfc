@@ -98,6 +98,7 @@ type State =
   , lockSelectedStep  :: Boolean -- when true, Step/Run don't reset viewedStep back to "follow the live step" — the manually-picked step stays selected through further solving
   , autoScrollHistory :: Boolean -- when false, new steps stop pulling the history squares' scroll position along while following (isolates/avoids that DOM cost on a long run)
   , lastHistoryDrawMs :: Number -- `msg.elapsedMs` as of the last actual history-canvas redraw; throttles `drawHistoryCanvasEffect` (see `WorkerMsg`), which is O(total history) per call
+  , pausedThisSession :: Boolean -- true once Pause has been clicked, until Reset/Extract — unlike `status`, doesn't flip back the instant Run/Continue is clicked again, so the Run/Continue button label can stay "Continue" through the disabled state too (see `renderRunControls`)
   }
 
 -- Which of the demo's 4 sample sources is currently selected, derived
@@ -197,6 +198,7 @@ initialState =
   , lockSelectedStep:  false
   , autoScrollHistory: true
   , lastHistoryDrawMs: 0.0
+  , pausedThisSession: false
   }
 
 -- ---------------------------------------------------------------------------
@@ -567,6 +569,41 @@ drawTileImage ctx img x y w h unique orientation = do
   Canvas.drawImageScale ctx img (-(w / 2.0)) (-(h / 2.0)) w h
   Canvas.restore ctx
 
+-- Fits an outW×outH grid's aspect ratio within a 320×320 box, longer side
+-- becoming 320px — keeps cells square for any grid shape instead of always
+-- squashing every output into an exact square (which visibly distorted
+-- non-square results). Shared by the `<canvas>` element's own size (see
+-- `renderMain`) and `drawCanvasEffect`'s drawing math, so they can never
+-- disagree about how big a cell is.
+canvasSizeFor :: Int -> Int -> { w :: Int, h :: Int }
+canvasSizeFor gridW gridH =
+  let maxBox = 320.0
+      gw = Int.toNumber (max 1 gridW)
+      gh = Int.toNumber (max 1 gridH)
+      scale = maxBox / max gw gh
+  in { w: max 1 (Int.round (gw * scale)), h: max 1 (Int.round (gh * scale)) }
+
+-- A flat, unlabeled outW×outH grid — drawn the instant a sample is picked
+-- or Result W/H changes, before Extract has even run (so there's no real
+-- catalog/wave yet to render a proper "every pattern still possible"
+-- superposition from). A deliberately different shade from both the real
+-- "uncollapsed" gray and the canvas background, so it reads as "just a
+-- size preview" rather than actual solving state.
+drawPlaceholderGrid :: Canvas.Context2D -> Number -> Number -> Int -> Int -> Effect Unit
+drawPlaceholderGrid ctx cw ch gridW gridH =
+  when (gridW > 0 && gridH > 0) do
+    let cellW = cw / Int.toNumber gridW
+        cellH = ch / Int.toNumber gridH
+    Canvas.setFillStyle ctx "#232a38"
+    for_ (Array.range 0 (gridH - 1)) \y ->
+      for_ (Array.range 0 (gridW - 1)) \x ->
+        Canvas.fillRect ctx
+          { x:      Int.toNumber x * cellW
+          , y:      Int.toNumber y * cellH
+          , width:  cellW - 0.5
+          , height: cellH - 0.5
+          }
+
 drawCanvasEffect :: State -> Effect Unit
 drawCanvasEffect st = do
   mCanvas <- Canvas.getCanvasElementById "wfc-canvas"
@@ -574,13 +611,14 @@ drawCanvasEffect st = do
     Nothing     -> pure unit
     Just canvas -> do
       ctx <- Canvas.getContext2D canvas
-      let cw = 320.0
-          ch = 320.0
+      let size = canvasSizeFor st.outW st.outH
+          cw = Int.toNumber size.w
+          ch = Int.toNumber size.h
       Canvas.clearRect ctx { x: 0.0, y: 0.0, width: cw, height: ch }
       Canvas.setFillStyle ctx "#1a1a2e"
       Canvas.fillRect ctx { x: 0.0, y: 0.0, width: cw, height: ch }
       case activeGrid st of
-        Nothing   -> pure unit
+        Nothing   -> drawPlaceholderGrid ctx cw ch st.outW st.outH
         Just grid -> do
           let height = Array.length grid
               width  = fromMaybe 0 (map Array.length (Array.head grid))
@@ -734,7 +772,10 @@ resizeLive :: H.HalogenM State Action Slots Void Aff Unit
 resizeLive = do
   st <- H.get
   case st.blankCellSnapshot of
-    Nothing -> pure unit
+    -- Nothing extracted yet, so there's no real grid/session to resize —
+    -- but the size *preview* (`drawCanvasEffect`'s placeholder-grid branch)
+    -- still needs to reflect the new Result W/H immediately.
+    Nothing -> drawCanvas
     Just blank -> do
       H.modify_ \s -> s
         { displayGrid = WP.resizeGrid blank s.outW s.outH <$> s.displayGrid
@@ -1169,14 +1210,17 @@ renderRunControls st =
         -- it — see `resetSessionCommand`'s callers), so clicking either Run
         -- button after one really does continue where it left off rather
         -- than starting over; "Continue" says so instead of implying a
-        -- fresh run. Reverts once `status` moves off `Stopped` (Reset,
-        -- Extract, or a fresh Run/Step actually landing).
-        [ HH.text (if st.status == Stopped then "▶ Continue once" else "▶ Run once") ]
+        -- fresh run. Driven by `pausedThisSession`, not `status` — `status`
+        -- flips to `Stepped` the instant Continue is clicked (to reflect
+        -- the run actually being live again), which would otherwise flip
+        -- the label back to "Run" while the button sits disabled through
+        -- that same run. `pausedThisSession` only clears on Reset/Extract.
+        [ HH.text (if st.pausedThisSession then "▶ Continue once" else "▶ Run once") ]
     , HH.button
         [ HE.onClick \_ -> RunUntilSolved
         , HP.disabled (notReady || st.running)
         ]
-        [ HH.text (if st.status == Stopped then "⏩ Continue until solved" else "⏩ Run until solved") ]
+        [ HH.text (if st.pausedThisSession then "⏩ Continue until solved" else "⏩ Run until solved") ]
     , HH.button
         [ HE.onClick \_ -> Stop
         , HP.disabled (not st.running)
@@ -1479,12 +1523,20 @@ renderSymmetryBadges cat pid =
 
 renderMain :: State -> H.ComponentHTML Action Slots Aff
 renderMain st =
+  let size = canvasSizeFor st.outW st.outH
+  in
   HH.div
     [ HP.class_ (H.ClassName "main-view") ]
     [ HH.canvas
         [ HP.id "wfc-canvas"
-        , HP.width 320
-        , HP.height 320
+        , HP.width size.w
+        , HP.height size.h
+        -- The CSS `width`/`height` (not just the intrinsic buffer size
+        -- above) is what `#wfc-canvas`'s `transition` rule in index.html
+        -- actually animates — set explicitly, and to the same numbers, so
+        -- switching examples/editing Result W/H eases the canvas to its
+        -- new size instead of snapping instantly.
+        , HP.style ("width:" <> show size.w <> "px;height:" <> show size.h <> "px;")
         ]
     , HH.canvas
         [ HP.id "upload-canvas"
@@ -1642,6 +1694,7 @@ handleAction = case _ of
       , displayGrid = Just (WP.waveToSnapshot cat wave)
       , progressLog = []
       , lastHistoryDrawMs = 0.0
+      , pausedThisSession = false
       , viewedStep  = Nothing
       , extractedWith = Just
           { patternSize: st.patternSize, useRotations: st.useRotations, useMirror: st.useMirror
@@ -1699,6 +1752,7 @@ handleAction = case _ of
       , viewedStep  = Nothing
       , progressLog = []
       , lastHistoryDrawMs = 0.0
+      , pausedThisSession = false
       , stepBackedOut = false
       , displayGrid = case Tuple st.catalog st.initWave_ of
           Tuple (Just cat) (Just w) -> Just (WP.waveToSnapshot cat w)
@@ -1712,7 +1766,7 @@ handleAction = case _ of
 
   Stop -> do
     sendToWorker stopCommand
-    H.modify_ _ { running = false, untilSolvedRunning = false, status = Stopped }
+    H.modify_ _ { running = false, untilSolvedRunning = false, status = Stopped, pausedThisSession = true }
 
   WorkerMsg ev -> do
     st <- H.get

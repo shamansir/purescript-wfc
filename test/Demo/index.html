@@ -343,6 +343,13 @@
       image-rendering: pixelated;
     }
 
+    /* Eases the canvas to its new aspect-fit size (set inline via JS,
+       see Demo.App's renderMain) whenever the selected example or Result
+       W/H changes, instead of snapping to it instantly. */
+    #wfc-canvas {
+      transition: width 0.3s ease, height 0.3s ease;
+    }
+
     /* ---- Matrix ---- */
     .matrix {
       border-collapse: collapse;
