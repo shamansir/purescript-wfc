@@ -16,21 +16,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - uses: purescript-contrib/setup-purescript@main
-        with:
-            spago: "unstable"
-
-      - name: Install npm deps
-        run: |
-          if [ -f package-lock.json ]; then npm ci; else echo "No npm deps"; fi
+      # This project's toolchain (purs-unstable/spago-unstable, pinned in
+      # flake.nix) only exists inside the Nix dev shell — no bare purs/spago
+      # calls, see CLAUDE.md.
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Build
-        run: spago build
+        run: nix develop --command bash -c "spago build --json-errors"
 
       - name: Test
-        run: spago test
+        run: nix develop --command bash -c "spago test"
