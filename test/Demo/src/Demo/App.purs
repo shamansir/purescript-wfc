@@ -75,6 +75,8 @@ type State =
   , displayGrid   :: Maybe Grid
   , progressLog   :: Array WP.Progress
   , customImage   :: Maybe WP.CustomImage
+  , imageLoading  :: Boolean -- true while a `SrcImage` sample's pixels are being fetched/decoded — see `renderSourcePreview`, which shows a plain placeholder box instead of `currentSampleDef`'s fallback (an unrelated built-in sample, `customImage` being `Nothing` mid-fetch) while this is true
+  , lastImageDims :: Maybe { w :: Int, h :: Int } -- the last successfully-loaded image's grid size, used to size that placeholder so it doesn't jump around
   , uploadError   :: Maybe String
   , useBacktracking :: Boolean
   , viewedStep      :: Maybe Int
@@ -175,6 +177,8 @@ initialState =
   , displayGrid:   Nothing
   , progressLog:   []
   , customImage:   Nothing
+  , imageLoading:  false
+  , lastImageDims: Nothing
   , uploadError:   Nothing
   , useBacktracking: false
   , viewedStep:      Nothing
@@ -1104,13 +1108,60 @@ renderSizeOption current n =
 -- choice is visible up front instead of only showing up once you've
 -- already clicked Extract.
 renderSourcePreview :: State -> H.ComponentHTML Action Slots Aff
-renderSourcePreview st = case sourceKindOf st of
-  SrcHandTiled  -> renderTilePreview (currentTileSample st)
-  SrcXmlTileset -> renderXmlTilesetPreview st
-  _             -> renderGridPreview (currentSampleDef st)
+renderSourcePreview st
+  -- `SrcImage`'s actual pixels only exist once `customImage` lands
+  -- (fetched/decoded asynchronously — see `SelectSample`/`UploadImage`);
+  -- while that's in flight, `customImage` is `Nothing`, and
+  -- `currentSampleDef`'s own fallback for that case is an unrelated
+  -- built-in sample (whichever `unsafeHead samples` is), not "the
+  -- previous image" — showing a neutral placeholder, sized to the last
+  -- successfully-loaded image, avoids that flash of wrong content.
+  | st.imageLoading = renderImageLoadingPlaceholder st
+  | otherwise = case sourceKindOf st of
+      SrcHandTiled  -> renderTilePreview (currentTileSample st)
+      SrcXmlTileset -> renderXmlTilesetPreview st
+      _             -> renderGridPreview (currentSampleDef st)
+
+renderImageLoadingPlaceholder :: State -> H.ComponentHTML Action Slots Aff
+renderImageLoadingPlaceholder st =
+  let dims   = fromMaybe { w: 16, h: 16 } st.lastImageDims
+      cellPx = sourceGridCellSize dims.w dims.h
+      boxW   = cellPx * Int.toNumber dims.w
+      boxH   = cellPx * Int.toNumber dims.h
+  in
+  HH.div
+    [ HP.class_ (H.ClassName "source-preview") ]
+    [ HH.div [ HP.class_ (H.ClassName "source-label") ] [ HH.text "Source: loading…" ]
+    , HH.div
+        [ HP.class_ (H.ClassName "source-grid-placeholder")
+        , HP.style ("width:" <> show boxW <> "px;height:" <> show boxH <> "px;")
+        ]
+        []
+    ]
+
+-- Cell size (width *and* height, always equal — keeps pixels square) for a
+-- gridW×gridH source preview, capped to fit a max box instead of a flat
+-- "10px" CSS constant. A plain `10px`-per-cell table left to the browser's
+-- default (auto) table layout silently distorted any sample wider than the
+-- sidebar can fit at 10px/cell (e.g. Font.png, 267×15): the layout engine
+-- shrinks column widths to fit but leaves row heights alone, squashing
+-- every cell into a non-square rectangle.
+sourceGridCellSize :: Int -> Int -> Number
+sourceGridCellSize gridW gridH =
+  let maxBoxW = 248.0 -- ~ .sidebar's content width after padding/border
+      maxBoxH = 200.0 -- keep a tall/narrow sample's preview from ever getting too tall
+      gw = Int.toNumber (max 1 gridW)
+      gh = Int.toNumber (max 1 gridH)
+  in min 10.0 (min (maxBoxW / gw) (maxBoxH / gh))
 
 renderGridPreview :: SampleDef -> H.ComponentHTML Action Slots Aff
 renderGridPreview sample =
+  let gridH = Array.length sample.grid
+      gridW = fromMaybe 0 (Array.length <$> Array.head sample.grid)
+      cellPx = sourceGridCellSize gridW gridH
+      cellStyle = "width:" <> show cellPx <> "px;height:" <> show cellPx <> "px;"
+      renderSourceCell v = HH.td [ HP.style (cellStyle <> "background:" <> sample.palette v <> ";") ] []
+  in
   HH.div
     [ HP.class_ (H.ClassName "source-preview") ]
     [ HH.div [ HP.class_ (H.ClassName "source-label") ] [ HH.text ("Source: " <> sample.name) ]
@@ -1118,8 +1169,6 @@ renderGridPreview sample =
         [ HP.class_ (H.ClassName "source-grid") ]
         (map (\row -> HH.tr_ (map renderSourceCell row)) sample.grid)
     ]
-  where
-  renderSourceCell v = HH.td [ HP.style ("background:" <> sample.palette v <> ";") ] []
 
 renderTilePreview :: TileSampleDef -> H.ComponentHTML Action Slots Aff
 renderTilePreview ts =
@@ -1642,10 +1691,15 @@ handleAction = case _ of
         case Array.index imageSamples (idx - Array.length samples) of
           Nothing  -> applySampleDefaults
           Just def -> do
+            H.modify_ _ { imageLoading = true }
             result <- H.liftAff (ImageUpload.loadImageFromUrl builtinImageMaxSide def.path def.name)
             case result of
-              Left err     -> H.modify_ _ { uploadError = Just err }
-              Right loaded -> H.modify_ _ { customImage = Just (customImageFrom loaded) }
+              Left err     -> H.modify_ _ { uploadError = Just err, imageLoading = false }
+              Right loaded -> H.modify_ _
+                { customImage   = Just (customImageFrom loaded)
+                , imageLoading  = false
+                , lastImageDims = Just { w: loaded.width, h: loaded.height }
+                }
             applySampleDefaults
       SrcXmlTileset ->
         -- Indices in the "(Tileset)" range are the original-WFC XML
@@ -1677,14 +1731,17 @@ handleAction = case _ of
           Nothing -> pure unit
           Just file -> do
             sendToWorker resetSessionCommand
+            H.modify_ _ { imageLoading = true }
             result <- H.liftAff (ImageUpload.loadImageAsSample 32 file)
             case result of
               Left err ->
-                H.modify_ _ { uploadError = Just err }
+                H.modify_ _ { uploadError = Just err, imageLoading = false }
               Right loaded -> do
                 H.modify_ \s -> (resetRunState s)
-                  { customImage = Just (customImageFrom loaded)
-                  , uploadError = Nothing
+                  { customImage   = Just (customImageFrom loaded)
+                  , uploadError   = Nothing
+                  , imageLoading  = false
+                  , lastImageDims = Just { w: loaded.width, h: loaded.height }
                   }
                 applySampleDefaults
     drawCanvas

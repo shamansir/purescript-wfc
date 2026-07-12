@@ -432,12 +432,29 @@
 
     .source-grid {
       border-collapse: collapse;
+      table-layout: fixed;
+      /* `.source-preview`'s `flex-direction:column` defaults to
+         `align-items:stretch` on the cross axis (width) — without this,
+         the table stretches to the full sidebar width regardless of its
+         own content size, and `table-layout:fixed` then spreads that
+         extra width evenly across every column, turning each cell into a
+         wide rectangle instead of the intended square. */
+      align-self: flex-start;
     }
 
     .source-grid td {
-      width: 10px;
-      height: 10px;
       padding: 0;
+    }
+
+    /* Shown instead of `.source-grid` while a `SrcImage` sample's pixels
+       are still being fetched/decoded — same neutral shade as the main
+       canvas's own pre-Extract placeholder, sized (via inline style) to
+       the last successfully-loaded image so nothing jumps around once the
+       real preview replaces it. */
+    .source-grid-placeholder {
+      background: #232a38;
+      border-radius: 2px;
+      align-self: flex-start;
     }
 
     .tile-list {
