@@ -336,6 +336,55 @@
       }
     }
 
+    /* ---- Portrait-only reorder: Extract + Run controls, then the main
+       canvas, then the history grid — everything else (sample picker,
+       size controls, patterns/rules, stats) follows after. `.mobile-top-
+       controls` is a *second* render of the same Extract button and
+       Step/Reset/Run/Pause row already inside `.sidebar`/`.run-panel`
+       (see Demo.App's `renderMobileTopControls`) — driven by the same
+       state/actions, just positioned at the top; the originals are hidden
+       here so nothing shows twice. Landscape/desktop are untouched. */
+    .mobile-top-controls {
+      display: none;
+    }
+
+    @media (orientation: portrait) {
+      .demo {
+        flex-direction: column;
+      }
+
+      .sidebar, .run-panel {
+        width: 100%;
+      }
+
+      .mobile-top-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        order: -1;
+      }
+
+      .sidebar > .controls {
+        display: none;
+      }
+
+      .run-panel > .controls {
+        display: none;
+      }
+
+      .main-view {
+        order: 1;
+      }
+
+      .run-panel {
+        order: 2;
+      }
+
+      .sidebar {
+        order: 3;
+      }
+    }
+
     canvas {
       border: 1px solid #30363d;
       border-radius: 4px;

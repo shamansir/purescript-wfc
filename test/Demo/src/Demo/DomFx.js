@@ -16,3 +16,7 @@ export function mouseOffsetImpl(ev) {
     return { x: ev.offsetX, y: ev.offsetY };
   };
 }
+
+export function isPortraitViewportImpl() {
+  return window.innerHeight > window.innerWidth;
+}

@@ -876,6 +876,7 @@ component = H.mkComponent
   , render
   , eval: H.mkEval H.defaultEval
       { handleAction = handleAction
+      , initialize   = Just Init
       , finalize     = Just Finalize
       }
   }
@@ -888,9 +889,28 @@ render :: State -> H.ComponentHTML Action Slots Aff
 render st =
   HH.div
     [ HP.class_ (H.ClassName "demo") ]
-    [ renderSidebar st
+    [ renderMobileTopControls st
+    , renderSidebar st
     , renderMain st
     , renderRunPanel st
+    ]
+
+-- A second copy of the Extract button (`renderSourceControls`) and the
+-- Step/Reset/Run/Pause row (`renderRunControls`) — same render functions,
+-- called again, so both copies stay driven by the exact same state/actions
+-- as the originals inside `.sidebar`/`.run-panel`, nothing to keep in sync
+-- by hand. `display:none` outside portrait (see index.html's CSS), where
+-- it's the only way to get these two controls — normally deep inside two
+-- different, otherwise-unmoved blocks — to the very top without actually
+-- restructuring `.sidebar`/`.run-panel` (and risking the desktop layout
+-- they're tuned for). The CSS also hides the *original* copies of these
+-- two specific blocks in portrait, so nothing doubles up on screen.
+renderMobileTopControls :: State -> H.ComponentHTML Action Slots Aff
+renderMobileTopControls st =
+  HH.div
+    [ HP.class_ (H.ClassName "mobile-top-controls") ]
+    [ renderSourceControls st
+    , renderRunControls st
     ]
 
 -- Sample source: picking/building/inspecting the pattern source, not
@@ -1592,7 +1612,15 @@ renderCell sample cell
 handleAction :: Action -> H.HalogenM State Action Slots Void Aff Unit
 handleAction = case _ of
 
-  Init -> pure unit
+  -- Portrait screens (the same "narrow" definition the layout reorder in
+  -- index.html's CSS uses) default history tracking/auto-scroll off —
+  -- they're the more expensive-to-keep-smooth features (see the earlier
+  -- per-step canvas-redraw throttling), and least useful on a small screen
+  -- where you're mostly watching the live canvas, not scrubbing history.
+  -- Desktop/landscape keep the existing on-by-default behavior untouched.
+  Init -> do
+    isPortrait <- H.liftEffect DomFx.isPortraitViewport
+    when isPortrait (H.modify_ _ { trackHistory = false, autoScrollHistory = false })
 
   Finalize -> do
     st <- H.get

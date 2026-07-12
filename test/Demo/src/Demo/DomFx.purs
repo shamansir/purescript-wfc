@@ -6,6 +6,7 @@
 module Demo.DomFx
   ( scrollIntoView
   , mouseOffset
+  , isPortraitViewport
   ) where
 
 import Prelude
@@ -28,3 +29,12 @@ foreign import mouseOffsetImpl :: MouseEvent -> Effect { x :: Number, y :: Numbe
 -- not needing a separate `getBoundingClientRect` call.
 mouseOffset :: MouseEvent -> Effect { x :: Number, y :: Number }
 mouseOffset = mouseOffsetImpl
+
+foreign import isPortraitViewportImpl :: Effect Boolean
+
+-- True when the viewport is taller than it is wide — the same "narrow
+-- screen" definition the portrait-only layout reorder in index.html's CSS
+-- uses (`@media (orientation: portrait)`), checked once at Init to decide
+-- whether history tracking/auto-scroll should default off.
+isPortraitViewport :: Effect Boolean
+isPortraitViewport = isPortraitViewportImpl
