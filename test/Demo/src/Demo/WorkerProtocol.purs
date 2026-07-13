@@ -42,11 +42,12 @@ type CustomImage =
   , outW     :: Int
   , outH     :: Int
   , name     :: String
+  , ground   :: Boolean -- see WFC.Propagate.applyGround; carried from the selected ImageSampleDef, false for uploads
   }
 
 emptyCustomImage :: CustomImage
 emptyCustomImage =
-  { grid: [], colors: [], n: 1, periodic: false, outW: 1, outH: 1, name: "" }
+  { grid: [], colors: [], n: 1, periodic: false, outW: 1, outH: 1, name: "", ground: false }
 
 paletteFromColors :: Array String -> Int -> String
 paletteFromColors colors v = fromMaybe "#888888" (Array.index colors v)
@@ -60,6 +61,7 @@ customSampleDef ci =
   , periodic: ci.periodic
   , outW: ci.outW
   , outH: ci.outH
+  , ground: ci.ground
   }
 
 -- Plain-data twin of `WFC.TileSet.TileDef` — `symmetry` travels as its

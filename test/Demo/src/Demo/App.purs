@@ -33,8 +33,9 @@ import Demo.TileSamples as TileSamples
 import Demo.WorkerProtocol (Grid, CellSnapshot)
 import Demo.WorkerProtocol as WP
 import Demo.XmlTileSamples (xmlTileSamples)
-import WFC.Catalog (PatternCatalog, extractPatterns)
+import WFC.Catalog (PatternCatalog, extractPatterns, lastPatternId)
 import WFC.Pattern (Pattern(..), PatternId)
+import WFC.Propagate (applyGround)
 import WFC.Rules (buildRules)
 import WFC.Tiles (buildTiledCatalog, buildTiledRules)
 import WFC.TileSet.Xml (parseTileSetXml)
@@ -424,15 +425,27 @@ clampInt lo hi n = max lo (min hi n)
 builtinImageMaxSide :: Int
 builtinImageMaxSide = 300
 
-customImageFrom :: ImageUpload.LoadedImage -> WP.CustomImage
-customImageFrom loaded =
+-- `periodic` (both extraction wrap and output wrap — `SampleDef`/`Command`
+-- don't distinguish the two for a given sample, see `sampleDefaults`) is
+-- tied to `ground`: the original C# WFC's ground samples (Flowers,
+-- MoreFlowers, Platformer, Skyline, Skyline2) all declare `periodic="True"`
+-- alongside `ground="True"`, and it isn't cosmetic — the "ground" pattern
+-- is the *wrap-around* window straddling the sample's bottom edge back to
+-- its top (bottom row of solid ground + top rows of sky), which only gets
+-- extracted at all when the input is periodic. Without it, the highest
+-- PatternId is just whatever ordinary interior window happened to be
+-- extracted last, and pinning that to the output's bottom row does nothing
+-- useful.
+customImageFrom :: Boolean -> ImageUpload.LoadedImage -> WP.CustomImage
+customImageFrom ground loaded =
   { grid: loaded.grid
   , colors: loaded.colors
   , n: clampInt 1 3 (min loaded.width loaded.height)
-  , periodic: false
+  , periodic: ground
   , outW: clampInt 16 64 (loaded.width * 3)
   , outH: clampInt 16 64 (loaded.height * 3)
   , name: loaded.name
+  , ground
   }
 
 -- ---------------------------------------------------------------------------
@@ -1696,7 +1709,7 @@ handleAction = case _ of
             case result of
               Left err     -> H.modify_ _ { uploadError = Just err, imageLoading = false }
               Right loaded -> H.modify_ _
-                { customImage   = Just (customImageFrom loaded)
+                { customImage   = Just (customImageFrom def.ground loaded)
                 , imageLoading  = false
                 , lastImageDims = Just { w: loaded.width, h: loaded.height }
                 }
@@ -1738,7 +1751,7 @@ handleAction = case _ of
                 H.modify_ _ { uploadError = Just err, imageLoading = false }
               Right loaded -> do
                 H.modify_ \s -> (resetRunState s)
-                  { customImage   = Just (customImageFrom loaded)
+                  { customImage   = Just (customImageFrom false loaded)
                   , uploadError   = Nothing
                   , imageLoading  = false
                   , lastImageDims = Just { w: loaded.width, h: loaded.height }
@@ -1753,7 +1766,7 @@ handleAction = case _ of
           case sourceKindOf st of
             SrcHandTiled ->
               let ts = currentTileSample st
-              in { cat: buildTiledCatalog ts.tiles, rules: buildTiledRules ts.tiles, palette: Nothing, tileOf: Nothing }
+              in { cat: buildTiledCatalog ts.tiles, rules: buildTiledRules ts.tiles, palette: Nothing, tileOf: Nothing, ground: false }
             SrcXmlTileset ->
               -- `st.customTileSet` should already be loaded by the time
               -- Extract is reachable (the button/its highlight don't wait
@@ -1761,14 +1774,26 @@ handleAction = case _ of
               -- than crash if it's clicked mid-load.
               let def = fromMaybe { unique: false, tiles: [], neighbors: [], subsets: [] } st.customTileSet
                   b   = WP.buildIntCatalogFromTileSet def
-              in { cat: b.catalog, rules: b.rules, palette: Just b.palette, tileOf: Just b.tileOf }
+              in { cat: b.catalog, rules: b.rules, palette: Just b.palette, tileOf: Just b.tileOf, ground: false }
             _ ->
               let sample = currentSampleDef st
                   c      = extractPatterns st.patternSize st.inputPeriodic st.useRotations st.useMirror sample.grid
-              in { cat: c, rules: buildRules c, palette: Nothing, tileOf: Nothing }
+              in { cat: c, rules: buildRules c, palette: Nothing, tileOf: Nothing, ground: sample.ground }
         cat   = built.cat
         rules = built.rules
-        wave  = initWave cat rules { width: st.outW, height: st.outH } st.outputPeriodic
+        wave0 = initWave cat rules { width: st.outW, height: st.outH } st.outputPeriodic
+        -- Pre-Run display should already show the pinned ground row, same
+        -- as the worker's own session does once Run/Step is pressed — a
+        -- contradiction here would mean the sample's own bottom row is
+        -- incompatible with its derived rules, which shouldn't happen; fall
+        -- back to the un-grounded wave rather than break the Extract preview.
+        wave = if built.ground
+                 then case lastPatternId cat of
+                        Just gpid -> case applyGround gpid wave0 of
+                          Right wave1 -> wave1
+                          Left _      -> wave0
+                        Nothing -> wave0
+                 else wave0
     H.modify_ \s -> s
       { status      = Ready
       , catalog     = Just cat

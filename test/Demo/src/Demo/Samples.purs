@@ -10,6 +10,7 @@ type SampleDef =
   , outH     :: Int
   , n        :: Int
   , periodic :: Boolean
+  , ground   :: Boolean
   }
 
 checkerboard :: SampleDef
@@ -28,6 +29,7 @@ checkerboard =
   , outH: 16
   , n: 2
   , periodic: true
+  , ground: false
   }
 
 rooms :: SampleDef
@@ -50,6 +52,7 @@ rooms =
   , outH: 20
   , n: 3
   , periodic: false
+  , ground: false
   }
 
 knot :: SampleDef
@@ -71,6 +74,7 @@ knot =
   , outH: 20
   , n: 3
   , periodic: true
+  , ground: false
   }
 
 circuit :: SampleDef
@@ -96,6 +100,7 @@ circuit =
   , outH: 20
   , n: 3
   , periodic: false
+  , ground: false
   }
 
 -- Patterns below inspired by the overlapping-model samples in
@@ -123,6 +128,7 @@ maze =
   , outH: 22
   , n: 3
   , periodic: false
+  , ground: false
   }
 
 cave :: SampleDef
@@ -145,6 +151,7 @@ cave =
   , outH: 20
   , n: 3
   , periodic: true
+  , ground: false
   }
 
 skyline :: SampleDef
@@ -175,6 +182,7 @@ skyline =
   , outH: 24
   , n: 3
   , periodic: true
+  , ground: true
   }
 
 village :: SampleDef
@@ -202,6 +210,7 @@ village =
   , outH: 24
   , n: 3
   , periodic: true
+  , ground: false
   }
 
 samples :: Array SampleDef

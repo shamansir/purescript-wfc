@@ -11,7 +11,7 @@ import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import WFC.Direction (Direction, allDirections, opposite)
-import WFC.Grid (Pos, neighborPos)
+import WFC.Grid (Pos(..), neighborPos, allPositions)
 import WFC.Pattern (PatternId)
 import WFC.Rules (lookupNeighbors)
 import WFC.Wave (Cell, Wave)
@@ -106,3 +106,24 @@ drainQueue st =
 propagate :: forall a. Wave a -> Array BanEvent -> Either Contradiction (Wave a)
 propagate wave initialBans =
   drainQueue { wave, queue: List.fromFoldable initialBans }
+
+-- "Ground" heuristic (mirrors the original C# WFC's per-sample `ground`
+-- flag): forces `groundPid` onto every cell of the bottom row, and bans it
+-- from every other row, then propagates the consequences. Matches
+-- OverlappingModel's Clear(): ground = T-1, the last pattern id assigned by
+-- extraction (see WFC.Catalog.extractPatterns's scan order).
+applyGround :: forall a. PatternId -> Wave a -> Either Contradiction (Wave a)
+applyGround groundPid wave =
+  propagate wave (allPositions wave.size >>= bansFor)
+  where
+    bottomY = wave.size.height - 1
+
+    bansFor pos@(Pos { y }) =
+      case Map.lookup pos wave.cells of
+        Just (Just pids) ->
+          if y == bottomY
+            then map (Tuple pos) (Array.filter (_ /= groundPid) (Set.toUnfoldable pids))
+            else if Set.member groundPid pids
+                   then [ Tuple pos groundPid ]
+                   else []
+        _ -> []

@@ -23,9 +23,9 @@ import Unsafe.Coerce (unsafeCoerce)
 import WFC.Algorithm (step)
 import WFC.Backtrack (SearchState, StepResult(..))
 import WFC.Backtrack as Backtrack
-import WFC.Catalog (PatternCatalog, extractPatterns)
+import WFC.Catalog (PatternCatalog, extractPatterns, lastPatternId)
 import WFC.Grid (GridSize, Pos(..))
-import WFC.Propagate (Contradiction(..))
+import WFC.Propagate (Contradiction(..), applyGround)
 import WFC.Rules (AdjacencyRules, buildRules)
 import WFC.Tiles (buildTiledCatalog, buildTiledRules)
 import WFC.Wave (Wave, initWave, resizeWave)
@@ -125,23 +125,38 @@ resizeSearchState newSize st = st { stack = map (\f -> f { wave = resizeWave new
 -- (`custom`/`customTileSet`) instead of indexing a compiled-in list.
 buildFromCommand
   :: Command
-  -> { cat :: PatternCatalog Int, rules :: AdjacencyRules, outW :: Int, outH :: Int, periodic :: Boolean }
+  -> { cat :: PatternCatalog Int, rules :: AdjacencyRules, outW :: Int, outH :: Int, periodic :: Boolean, ground :: Boolean }
 buildFromCommand cmd =
   case cmd.sourceKind of
     "handTiled" ->
       let ts = fromMaybe roads (Array.index TileSamples.samples cmd.sampleIdx)
       in { cat: buildTiledCatalog ts.tiles, rules: buildTiledRules ts.tiles
-         , outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic
+         , outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic, ground: false
          }
     "xmlTileset" ->
       let built = buildIntCatalogFromTileSet (fromWireTileSet cmd.customTileSet)
-      in { cat: built.catalog, rules: built.rules, outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic }
+      in { cat: built.catalog, rules: built.rules, outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic, ground: false }
     _ ->
       let sample = if cmd.sourceKind == "image"
                      then customSampleDef cmd.custom
                      else fromMaybe checkerboard (Array.index samples cmd.sampleIdx)
           cat    = extractPatterns cmd.patternSize cmd.inputPeriodic cmd.useRotations cmd.useMirror sample.grid
-      in { cat, rules: buildRules cat, outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic }
+      in { cat, rules: buildRules cat, outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic, ground: sample.ground }
+
+-- Applies the "ground" heuristic (see WFC.Propagate.applyGround) to a
+-- freshly-initialized wave, when the active sample declares `ground: true`.
+-- A contradiction here would mean the sample's own bottom-row pattern is
+-- already incompatible with the adjacency rules derived from itself, which
+-- shouldn't happen in practice — falls back to the un-grounded wave rather
+-- than crash the session.
+applyGroundIfNeeded :: forall r. { cat :: PatternCatalog Int, ground :: Boolean | r } -> Wave Int -> Wave Int
+applyGroundIfNeeded built wave0
+  | not built.ground = wave0
+  | otherwise = case lastPatternId built.cat of
+      Nothing   -> wave0
+      Just gpid -> case applyGround gpid wave0 of
+        Left (Contradiction _) -> wave0
+        Right wave1             -> wave1
 
 -- Reuse the existing session if one's alive, otherwise build a brand-new
 -- wave/search from `cmd` and stash it — this is what makes an idle worker
@@ -154,7 +169,8 @@ getOrInitSession sessionRef cmd = do
     Just s -> pure s
     Nothing -> do
       let built = buildFromCommand cmd
-          wave0 = initWave built.cat built.rules { width: built.outW, height: built.outH } built.periodic
+          wave0 = applyGroundIfNeeded built
+                     (initWave built.cat built.rules { width: built.outW, height: built.outH } built.periodic)
       t0 <- now
       session <-
         if cmd.useBacktracking then do

@@ -137,3 +137,12 @@ extractPatterns n periodic useRotations useMirror grid =
         taggedVariantsFor n useRotations useMirror (patternAt n periodic w h grid x y)
       acc = foldl (\a (Tuple tag pat) -> accumulatePattern a tag pat) emptyAccum allVariants
   in finalize acc n
+
+-- The "ground" heuristic (see WFC.Propagate.applyGround) pins the
+-- highest-numbered pattern id — the original C# WFC's `T-1`, the last
+-- pattern whose pixel content was newly discovered during `extractPatterns`'s
+-- row-major scan (see the `positions`/`allVariants` order above).
+lastPatternId :: forall a. PatternCatalog a -> Maybe PatternId
+lastPatternId cat =
+  let n = Map.size cat.patterns
+  in if n == 0 then Nothing else Just (PatternId (n - 1))

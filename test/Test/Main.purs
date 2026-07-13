@@ -18,7 +18,7 @@ import Test.Spec.Assertions (fail, shouldEqual, shouldSatisfy)
 import Test.Spec.Reporter.Console (consoleReporter)
 import Test.Spec.Runner.Node (runSpecAndExitProcess)
 
-import WFC.Catalog (PatternCatalog, extractPatterns)
+import WFC.Catalog (PatternCatalog, extractPatterns, lastPatternId)
 import WFC.Direction (Direction(..), allDirections, opposite)
 import WFC.Grid (Pos(..), allPositions, neighborPos)
 import WFC.Pattern (Pattern(..), PatternId(..), agrees, reflect, rotate)
@@ -26,7 +26,7 @@ import WFC.Rules (AdjacencyRules, buildRules, lookupNeighbors)
 import WFC.Wave (Wave, getCellPossibilities, initWave, isFullyCollapsed)
 import WFC.Entropy (cellEntropy, cellsWithEntropy, minEntropyPos)
 import WFC.Collapse (collapseAt)
-import WFC.Propagate (propagate)
+import WFC.Propagate (applyGround, propagate)
 import WFC.Algorithm (wfc, wfcWithRetry)
 import WFC.Backtrack (StepResult(..), solveWithBacktracking, stepSearch)
 import WFC.Render (renderWave, renderWaveWith)
@@ -123,6 +123,30 @@ tileCatalog = buildTiledCatalog tileSet
 
 tileRules :: AdjacencyRules
 tileRules = buildTiledRules tileSet
+
+-- A 2-tile fixture for the applyGround tests below: `groundTile` is
+-- self-compatible horizontally (like a real sample's solid ground row) and
+-- sits directly beneath `skyTile`, which is self-compatible in every
+-- direction (so any number of non-ground rows can stack on each other).
+-- `groundTile` is last in the array, matching `lastPatternId`'s "highest
+-- PatternId = T-1" assumption.
+skyTile :: TileDef Int
+skyTile = { value: 0, weight: 1.0, sockets: { left: "s", right: "s", up: "u", down: "u" } }
+
+groundTile :: TileDef Int
+groundTile = { value: 1, weight: 1.0, sockets: { left: "g", right: "g", up: "u", down: "d" } }
+
+groundSkyCatalog :: PatternCatalog Int
+groundSkyCatalog = buildTiledCatalog [ skyTile, groundTile ]
+
+groundSkyRules :: AdjacencyRules
+groundSkyRules = buildTiledRules [ skyTile, groundTile ]
+
+pSky :: PatternId
+pSky = PatternId 0
+
+pGround :: PatternId
+pGround = PatternId 1
 
 -- test/Demo/tilesets/Knots.xml, embedded verbatim — the smallest of the 7
 -- real original-WFC tileset XML files (5 tiles, 35 neighbor rules, 10
@@ -992,3 +1016,33 @@ main = runSpecAndExitProcess [consoleReporter] do
             case result of
               Left _ -> fail "backtracking failed to solve a small Knots wave"
               Right w' -> isFullyCollapsed w' `shouldEqual` true
+
+  -- =========================================================================
+  describe "Stage 12 · WFC.Propagate.applyGround — original-WFC 'ground' heuristic" do
+  -- =========================================================================
+  -- Regression coverage for the Flowers/MoreFlowers bug: a sample's bottom
+  -- row should consistently collapse to its own ground-truth pattern, not
+  -- scatter like every other row. `groundSkyCatalog`'s last-extracted
+  -- pattern (`pGround` = PatternId 1, matching `lastPatternId
+  -- groundSkyCatalog`) stands in for the original C# WFC's `T-1`.
+
+    it "pins the ground pattern onto the bottom row and bans it from every other row" do
+      let wave0 = initWave groundSkyCatalog groundSkyRules { width: 2, height: 3 } false
+      lastPatternId groundSkyCatalog `shouldEqual` Just pGround
+      case applyGround pGround wave0 of
+        Left _   -> fail "unexpected contradiction grounding a ground/sky wave"
+        Right w' -> do
+          getCellPossibilities w' (pos 0 2) `shouldEqual` Just (Set.singleton pGround)
+          getCellPossibilities w' (pos 1 2) `shouldEqual` Just (Set.singleton pGround)
+          for_ [ pos 0 0, pos 1 0, pos 0 1, pos 1 1 ] \p ->
+            case getCellPossibilities w' p of
+              Nothing   -> fail ("cell " <> show p <> " became a contradiction")
+              Just pids -> Set.member pGround pids `shouldEqual` false
+
+    it "height 1: the single row is entirely the bottom row (no other rows to ban from)" do
+      let wave0 = initWave groundSkyCatalog groundSkyRules { width: 2, height: 1 } false
+      case applyGround pGround wave0 of
+        Left _   -> fail "unexpected contradiction grounding a 1-row wave"
+        Right w' -> do
+          getCellPossibilities w' (pos 0 0) `shouldEqual` Just (Set.singleton pGround)
+          getCellPossibilities w' (pos 1 0) `shouldEqual` Just (Set.singleton pGround)
