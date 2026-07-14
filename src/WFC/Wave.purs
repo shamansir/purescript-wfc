@@ -12,17 +12,46 @@ import Data.Set (Set)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import WFC.Catalog (PatternCatalog)
-import WFC.Direction (Direction, allDirections)
+import WFC.CompatibilityMap (CompatibilityMap)
+import WFC.CompatibilityMap as CompatibilityMap
+import WFC.Direction (Direction, allDirections, dirIndex)
 import WFC.Grid (GridSize, Pos(..), allPositions)
-import WFC.Pattern (PatternId)
+import WFC.Pattern (PatternId(..))
 import WFC.Rules (AdjacencyRules, initialCompatCount)
 
 -- Per-cell possibilities. Nothing = contradiction at this cell.
 type Cell = Maybe (Set PatternId)
 
--- compat[pos][pid][dir] = number of tiles in the direction-dir neighbour of pos
--- that still support pid being at pos.  Reaches 0 → pid must be banned.
-type CompatMap = Map Pos (Map PatternId (Map Direction Int))
+-- Phantom tag for `CompatCell`'s combined `Int` key (see `compatInnerKey`)
+-- — never constructed, exists purely so its keys don't type-check as
+-- interchangeable with some other `CompatibilityMap`'s.
+data CompatKey
+
+-- Per-position compat table: compat[pid][dir] = number of tiles in the
+-- direction-dir neighbour of this position that still support pid being
+-- here. Reaches 0 → pid must be banned. `PatternId × Direction` folded into
+-- one combined `Int` key (via `CompatibilityMap`) instead of two nested
+-- `Map`s — one tree and one fast `Int` comparator per update instead of a
+-- `PatternId`-keyed tree containing a further `Direction`-keyed tree.
+--
+-- (An earlier version of this also folded `Pos` into the same combined
+-- key, giving one flat `P×T×4`-entry map. Measured slower, not faster: it
+-- turned every `decrementCompat` into two full traversals of a much
+-- *deeper* tree — `log(P×T×4)`, bigger than the outer `Pos` tree's
+-- `log(P)` alone — instead of one `Map.alter` each on an outer `Pos`-keyed
+-- tree with only `P` entries and an inner table shared by reference across
+-- every position at `initWave`. Keeping `Pos` as `CompatMap`'s own outer
+-- key preserves that sharing.)
+type CompatCell = CompatibilityMap CompatKey Int
+
+type CompatMap = Map Pos CompatCell
+
+-- Fold (pid, dir) into `CompatCell`'s single combined `Int` key. Doesn't
+-- depend on grid size/position, so — unlike an earlier version that also
+-- folded `Pos` in — a computed key stays valid across a `resizeWave`;
+-- kept positions' `CompatCell`s carry over unchanged, same as `cells`.
+compatInnerKey :: PatternId -> Direction -> Int
+compatInnerKey (PatternId pid) dir = pid * 4 + dirIndex dir
 
 -- Running totals behind a cell's Shannon entropy (`entropyFromStats` below),
 -- kept incrementally in sync with `cells` by every single ban (see
@@ -68,16 +97,16 @@ type Wave a =
   , periodic :: Boolean
   }
 
-initialCompatEntry
-  :: AdjacencyRules
-  -> PatternId
-  -> Map Direction Int
-initialCompatEntry rules pid =
-  Map.fromFoldable $ map (\dir -> Tuple dir (initialCompatCount rules pid dir)) allDirections
-
-initialCellCompat :: AdjacencyRules -> Array PatternId -> Map PatternId (Map Direction Int)
-initialCellCompat rules ids =
-  Map.fromFoldable $ map (\pid -> Tuple pid (initialCompatEntry rules pid)) ids
+-- The shared per-position compat table for a freshly-superposed cell — same
+-- `CompatCell` value (structural sharing, not recomputed) reused for every
+-- position, the same way a fresh `Cell`'s possibility set is one shared
+-- `Set` reused everywhere rather than built once per position.
+initialCompatCell :: AdjacencyRules -> Array PatternId -> CompatCell
+initialCompatCell rules ids =
+  CompatibilityMap.fromFoldable $ do
+    pid <- ids
+    dir <- allDirections
+    pure (Tuple (compatInnerKey pid dir) (initialCompatCount rules pid dir))
 
 -- Create a wave where every cell is in full superposition.
 initWave
@@ -92,7 +121,7 @@ initWave catalog rules size periodic =
                    (Map.toUnfoldable catalog.patterns :: Array (Tuple PatternId _))
       allPids  = Set.fromFoldable ids
       initCell = Just allPids
-      cellComp = initialCellCompat rules ids
+      cellComp = initialCompatCell rules ids
       initStats = statsForAll catalog
       positions = allPositions size
       cells    = Map.fromFoldable $ map (\pos -> Tuple pos initCell) positions
@@ -116,7 +145,7 @@ resizeWave newSize wave =
   let
     ids       = map (\(Tuple pid _) -> pid) (Map.toUnfoldable wave.catalog.patterns :: Array (Tuple PatternId _))
     initCell  = Just (Set.fromFoldable ids)
-    cellComp  = initialCellCompat wave.rules ids
+    cellComp  = initialCompatCell wave.rules ids
     initStats = statsForAll wave.catalog
     inBounds (Pos { x, y }) = x >= 0 && x < newSize.width && y >= 0 && y < newSize.height
     keptCells   = Map.filterKeys inBounds wave.cells

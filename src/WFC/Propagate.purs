@@ -10,11 +10,12 @@ import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
+import WFC.CompatibilityMap as CompatibilityMap
 import WFC.Direction (Direction, allDirections, opposite)
 import WFC.Grid (Pos(..), neighborPos, allPositions)
 import WFC.Pattern (PatternId)
 import WFC.Rules (lookupNeighbors)
-import WFC.Wave (Cell, Wave)
+import WFC.Wave (Cell, Wave, compatInnerKey)
 
 newtype Contradiction = Contradiction Pos
 
@@ -33,20 +34,17 @@ type PropState a =
 getCompat :: forall a. Wave a -> Pos -> PatternId -> Direction -> Int
 getCompat wave pos pid dir =
   fromMaybe 0 $ do
-    byPid <- Map.lookup pos wave.compat
-    byDir <- Map.lookup pid byPid
-    Map.lookup dir byDir
+    cell <- Map.lookup pos wave.compat
+    CompatibilityMap.lookup (compatInnerKey pid dir) cell
 
 -- Decrement the compat count for (pos, pid, dir); return new count + updated wave.
 decrementCompat
   :: forall a
   .  Pos -> PatternId -> Direction -> Wave a -> Tuple Int (Wave a)
 decrementCompat pos pid dir wave =
-  let newCount = getCompat wave pos pid dir - 1
-      newCompat = Map.alter
-        (map (Map.alter (map (Map.insert dir newCount)) pid))
-        pos
-        wave.compat
+  let key       = compatInnerKey pid dir
+      newCount  = getCompat wave pos pid dir - 1
+      newCompat = Map.alter (map (CompatibilityMap.insert key newCount)) pos wave.compat
   in Tuple newCount (wave { compat = newCompat })
 
 -- For each direction from pos, find neighbours that relied on pid

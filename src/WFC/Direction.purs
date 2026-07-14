@@ -16,6 +16,15 @@ instance showDirection :: Show Direction where
 allDirections :: Array Direction
 allDirections = [ DirL, DirD, DirR, DirU ]
 
+-- Dense 0..3 ordinal matching `allDirections`'s order — used to fold a
+-- Direction into a combined integer index (see WFC.Wave.compatKey) instead
+-- of comparing/hashing the constructor itself.
+dirIndex :: Direction -> Int
+dirIndex DirL = 0
+dirIndex DirD = 1
+dirIndex DirR = 2
+dirIndex DirU = 3
+
 dirOffset :: Direction -> { dx :: Int, dy :: Int }
 dirOffset DirL = { dx: -1, dy:  0 }
 dirOffset DirD = { dx:  0, dy:  1 }

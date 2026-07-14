@@ -23,10 +23,10 @@ import WFC.Direction (Direction(..), allDirections, opposite)
 import WFC.Grid (Pos(..), allPositions, neighborPos)
 import WFC.Pattern (Pattern(..), PatternId(..), agrees, reflect, rotate)
 import WFC.Rules (AdjacencyRules, buildRules, lookupNeighbors)
-import WFC.Wave (Wave, getCellPossibilities, initWave, isFullyCollapsed)
+import WFC.Wave (Wave, getCellPossibilities, initWave, isFullyCollapsed, resizeWave)
 import WFC.Entropy (cellEntropy, cellsWithEntropy, minEntropyPos)
 import WFC.Collapse (collapseAt)
-import WFC.Propagate (applyGround, propagate)
+import WFC.Propagate (applyGround, getCompat, propagate)
 import WFC.Algorithm (wfc, wfcWithRetry)
 import WFC.Backtrack (StepResult(..), solveWithBacktracking, stepSearch)
 import WFC.Render (renderWave, renderWaveWith)
@@ -465,6 +465,35 @@ main = runSpecAndExitProcess [consoleReporter] do
           rules = buildRules cat
           wave  = initWave cat rules { width: 3, height: 3 } false
       isFullyCollapsed wave `shouldEqual` true
+
+    it "resizeWave carries compat counts over correctly when the grid width changes" do
+      -- CompatMap is `Pos`-keyed (see WFC.Wave.CompatMap/CompatCell) same
+      -- as `cells`, so a kept position's compat entry should survive a
+      -- resize completely unchanged, including a WIDTH change (not just
+      -- height) — regression coverage against a prior version that folded
+      -- position into the compat key itself, which needed (and easily
+      -- could have gotten wrong) explicit re-encoding on every resize.
+      -- Propagate first so compat counts are non-initial values.
+      let wave0 = initWave checkerCatalog checkerRules { width: 2, height: 2 } false
+      case propagate wave0 [ Tuple (pos 0 0) p1 ] of
+        Left _ -> fail "unexpected contradiction setting up the resize fixture"
+        Right wave1 -> do
+          let kept    = [ pos 0 0, pos 1 0, pos 0 1, pos 1 1 ]
+              triples = do
+                p   <- kept
+                pid <- [ p0, p1 ]
+                dir <- allDirections
+                pure (Tuple p (Tuple pid dir))
+              compatOf w = map (\(Tuple p (Tuple pid dir)) -> getCompat w p pid dir) triples
+              before = compatOf wave1
+              wave2  = resizeWave { width: 4, height: 2 } wave1
+              after  = compatOf wave2
+          -- every kept position's compat counts survive the resize unchanged
+          after `shouldEqual` before
+          -- a position that only exists after widening starts fresh (same
+          -- as a brand-new initWave's value), not from some leftover entry
+          -- that happened to collide under the old width's key encoding
+          getCompat wave2 (pos 3 0) p0 DirR `shouldEqual` getCompat wave0 (pos 0 0) p0 DirR
 
   -- =========================================================================
   describe "Stage 4 · entropy — measure uncertainty; pick the cell to observe next" do
