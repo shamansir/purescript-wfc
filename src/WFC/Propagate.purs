@@ -10,6 +10,7 @@ import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
+import WFC.Catalog (weightOf, wLogWOf)
 import WFC.CompatibilityMap as CompatibilityMap
 import WFC.Direction (Direction, allDirections, opposite)
 import WFC.Grid (Pos(..), neighborPos, allPositions)
@@ -88,8 +89,8 @@ processBan (Tuple pos pid) st =
               -- Keep the entropy cache in lockstep with `cells`, one banned
               -- pattern's weight/wLogW at a time, instead of ever re-summing
               -- a cell's whole possibility set (see WFC.Wave.EntropyStats).
-              w        = fromMaybe 0.0 (Map.lookup pid st.wave.catalog.weights)
-              wlw      = fromMaybe 0.0 (Map.lookup pid st.wave.catalog.wLogW)
+              w        = weightOf st.wave.catalog pid
+              wlw      = wLogWOf st.wave.catalog pid
               newEntropy = Map.update
                 (\stats -> Just { sumW: stats.sumW - w, sumWLogW: stats.sumWLogW - wlw })
                 pos

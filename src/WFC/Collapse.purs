@@ -11,6 +11,7 @@ import Data.Set as Set
 import Data.Tuple (Tuple(..), fst)
 import Effect (Effect)
 import Effect.Random (random)
+import WFC.Catalog (weightOf)
 import WFC.Grid (Pos)
 import WFC.Pattern (PatternId)
 import WFC.Propagate (BanEvent, Contradiction(..), propagate)
@@ -30,10 +31,7 @@ pickWeighted threshold ws = go 0.0 ws
 weightedSample :: forall a. Wave a -> Set.Set PatternId -> Effect (Maybe PatternId)
 weightedSample wave possible = do
   let pids   = Set.toUnfoldable possible :: Array PatternId
-      ws     = map (\pid -> Tuple pid
-                     (case Map.lookup pid wave.catalog.weights of
-                       Just w  -> w
-                       Nothing -> 0.0)) pids
+      ws     = map (\pid -> Tuple pid (weightOf wave.catalog pid)) pids
       totalW = foldl (\acc (Tuple _ w) -> acc + w) 0.0 ws
   if totalW <= 0.0
     then pure Nothing

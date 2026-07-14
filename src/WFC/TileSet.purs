@@ -22,7 +22,7 @@ import Data.Tuple (Tuple(..))
 import WFC.Catalog (Accum, PatternCatalog, finalize)
 import WFC.Direction (Direction(..), opposite)
 import WFC.Pattern (Pattern(..), PatternId(..))
-import WFC.Rules (AdjacencyRules(..))
+import WFC.Rules (AdjacencyRules, fromNestedMap)
 import WFC.TileSet.Symmetry (Symmetry(..), distinctOrientations, reflectIndex, rotateIndex, rotateIndexBy)
 
 -- One specific oriented tile — a base tile name plus which of its own
@@ -204,7 +204,7 @@ buildTileSet def =
         (Map.singleton fromPid [ toPid ])
         m
 
-    rules = AdjacencyRules (Array.foldl addFact Map.empty facts)
+    rules = fromNestedMap (Array.length indexed) (Array.foldl addFact Map.empty facts)
   in
     { catalog, rules, index }
 

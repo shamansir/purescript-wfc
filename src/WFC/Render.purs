@@ -8,7 +8,7 @@ import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set as Set
 import Data.Traversable (traverse)
-import WFC.Catalog (PatternCatalog)
+import WFC.Catalog (PatternCatalog, patternOf)
 import WFC.Grid (Pos(..))
 import WFC.Pattern (Pattern(..), PatternId)
 import WFC.Wave (Wave)
@@ -16,7 +16,7 @@ import WFC.Wave (Wave)
 -- Extract the top-left pixel of a pattern — canonical output pixel for that cell.
 topLeftPixel :: forall a. PatternCatalog a -> PatternId -> Maybe a
 topLeftPixel catalog pid = do
-  Pattern px <- Map.lookup pid catalog.patterns
+  Pattern px <- patternOf catalog pid
   Array.head px
 
 -- Read the single collapsed PatternId from a cell.

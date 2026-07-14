@@ -11,7 +11,7 @@ import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import Demo.Samples (SampleDef)
-import WFC.Catalog (PatternCatalog)
+import WFC.Catalog (PatternCatalog, patternIds, patternsWithIds)
 import WFC.Grid (Pos(..))
 import WFC.Pattern (Pattern(..), PatternId(..))
 import WFC.Render (topLeftPixel)
@@ -127,9 +127,9 @@ buildIntCatalogFromTileSet
 buildIntCatalogFromTileSet def =
   let
     built = buildTileSet def
-    entries = Map.toUnfoldable built.catalog.patterns :: Array (Tuple PatternId (Pattern TileInstance))
+    entries = patternsWithIds built.catalog :: Array (Tuple PatternId (Pattern TileInstance))
     intOf (PatternId i) = i
-    newPatterns = Map.fromFoldable (map (\(Tuple pid _) -> Tuple pid (Pattern [ intOf pid ])) entries)
+    newPatterns = map (\(Tuple pid _) -> Pattern [ intOf pid ]) entries
     catalog = built.catalog { patterns = newPatterns }
     refsByInt :: Map Int TileRef
     refsByInt = Map.fromFoldable
@@ -222,7 +222,7 @@ cellSnapshot cat (Just pids) =
 -- W/H grows (see `resizeGrid`), without waiting on (or restarting) a solve.
 blankCellSnapshot :: PatternCatalog Int -> CellSnapshot
 blankCellSnapshot cat =
-  cellSnapshot cat (Just (Set.fromFoldable (map (\(Tuple pid _) -> pid) (Map.toUnfoldable cat.patterns :: Array (Tuple PatternId (Pattern Int))))))
+  cellSnapshot cat (Just (Set.fromFoldable (patternIds cat)))
 
 -- Crop rows/columns beyond `newW`/`newH`, or pad the right/bottom edge with
 -- `blank` — never touching a cell within the old bounds. Top-left anchored,

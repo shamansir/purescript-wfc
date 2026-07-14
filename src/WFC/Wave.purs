@@ -11,7 +11,7 @@ import Data.Number (log)
 import Data.Set (Set)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
-import WFC.Catalog (PatternCatalog)
+import WFC.Catalog (PatternCatalog, patternIds, weightOf, wLogWOf)
 import WFC.CompatibilityMap (CompatibilityMap, CompatibilityMapKey(..))
 import WFC.CompatibilityMap as CompatibilityMap
 import WFC.Direction (Direction, allDirections, dirIndex)
@@ -82,8 +82,8 @@ statsForAll catalog = { sumW: catalog.totalW, sumWLogW: catalog.totalWLogW }
 statsForSet :: forall a. PatternCatalog a -> Set PatternId -> EntropyStats
 statsForSet catalog possible =
   let pids = Set.toUnfoldable possible :: Array PatternId
-      sumW = foldl (\acc pid -> acc + fromMaybe 0.0 (Map.lookup pid catalog.weights)) 0.0 pids
-      sumWLogW = foldl (\acc pid -> acc + fromMaybe 0.0 (Map.lookup pid catalog.wLogW)) 0.0 pids
+      sumW = foldl (\acc pid -> acc + weightOf catalog pid) 0.0 pids
+      sumWLogW = foldl (\acc pid -> acc + wLogWOf catalog pid) 0.0 pids
   in { sumW, sumWLogW }
 
 type Wave a =
@@ -116,8 +116,7 @@ initWave
   -> Boolean
   -> Wave a
 initWave catalog rules size periodic =
-  let ids      = map (\(Tuple pid _) -> pid)
-                   (Map.toUnfoldable catalog.patterns :: Array (Tuple PatternId _))
+  let ids      = patternIds catalog
       allPids  = Set.fromFoldable ids
       initCell = Just allPids
       cellComp = initialCompatibilityCell rules ids
@@ -142,7 +141,7 @@ initWave catalog rules size periodic =
 resizeWave :: forall a. GridSize -> Wave a -> Wave a
 resizeWave newSize wave =
   let
-    ids       = map (\(Tuple pid _) -> pid) (Map.toUnfoldable wave.catalog.patterns :: Array (Tuple PatternId _))
+    ids       = patternIds wave.catalog
     initCell  = Just (Set.fromFoldable ids)
     cellComp  = initialCompatibilityCell wave.rules ids
     initStats = statsForAll wave.catalog

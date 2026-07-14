@@ -9,7 +9,7 @@ import Data.Tuple (Tuple(..))
 import WFC.Catalog (Accum, PatternCatalog, finalize)
 import WFC.Direction (Direction(..), allDirections)
 import WFC.Pattern (Pattern(..), PatternId(..))
-import WFC.Rules (AdjacencyRules(..))
+import WFC.Rules (AdjacencyRules, fromNestedMap)
 
 -- The classic Wang-tile mechanism: a tile's compatibility with its
 -- neighbours is expressed per-side as a label, not as a hand-written list
@@ -73,4 +73,5 @@ buildTiledRules tileDefs =
         Map.fromFoldable $ map
           (\(Tuple pid tileA) -> Tuple pid (compatibleWith dir tileA))
           indexed
-  in AdjacencyRules $ Map.fromFoldable $ map (\dir -> Tuple dir (forDir dir)) allDirections
+      byDir = Map.fromFoldable $ map (\dir -> Tuple dir (forDir dir)) allDirections
+  in fromNestedMap (Array.length tileDefs) byDir

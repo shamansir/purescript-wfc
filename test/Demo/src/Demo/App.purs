@@ -33,7 +33,7 @@ import Demo.TileSamples as TileSamples
 import Demo.WorkerProtocol (Grid, CellSnapshot)
 import Demo.WorkerProtocol as WP
 import Demo.XmlTileSamples (xmlTileSamples)
-import WFC.Catalog (PatternCatalog, extractPatterns, lastPatternId)
+import WFC.Catalog (PatternCatalog, extractPatterns, lastPatternId, patternsWithIds)
 import WFC.Pattern (Pattern(..), PatternId)
 import WFC.Propagate (applyGround)
 import WFC.Rules (buildRules)
@@ -1360,7 +1360,7 @@ renderStats st =
   let catInfo = case st.catalog of
         Nothing  -> "No patterns"
         Just cat ->
-          show (Map.size cat.patterns) <> " patterns, size "
+          show (Array.length cat.patterns) <> " patterns, size "
           <> show cat.size <> "×" <> show cat.size
       lastMs = fromMaybe 0.0 (Array.last st.stepTimes)
       segments = iterationStepCounts st.progressLog
@@ -1484,14 +1484,14 @@ renderPatterns st =
             [ HH.text
                 ( (if st.showPats then "▲ " else "▼ ")
                   <> (if patternsStale st then "~" else "")
-                  <> "Patterns (" <> show (Map.size cat.patterns) <> ")"
+                  <> "Patterns (" <> show (Array.length cat.patterns) <> ")"
                 )
             ]
         , if st.showPats
             then
               HH.div
                 [ HP.class_ (H.ClassName "pattern-list") ]
-                (map (renderPatThumb st cat) (Map.toUnfoldable cat.patterns :: Array _))
+                (map (renderPatThumb st cat) (patternsWithIds cat))
             else
               HH.text ""
         ]
