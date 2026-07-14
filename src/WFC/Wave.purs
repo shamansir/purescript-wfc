@@ -12,7 +12,7 @@ import Data.Set (Set)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import WFC.Catalog (PatternCatalog, patternIds, weightOf, wLogWOf)
-import WFC.CompatibilityMap (CompatibilityMap, CompatibilityMapKey(..))
+import WFC.CompatibilityMap (CompatibilityKey(..), CompatibilityMap)
 import WFC.CompatibilityMap as CompatibilityMap
 import WFC.Direction (Direction, allDirections, dirIndex)
 import WFC.Grid (GridSize, Pos(..), allPositions)
@@ -21,11 +21,6 @@ import WFC.Rules (AdjacencyRules, initialCompatCount)
 
 -- Per-cell possibilities. Nothing = contradiction at this cell.
 type Cell = Maybe (Set PatternId)
-
--- Phantom tag for `CompatibilityCell`'s combined key (see
--- `compatibilityKey`) — never constructed, exists purely so its keys don't
--- type-check as interchangeable with some other `CompatibilityMap`'s.
-data CompatibilityKey
 
 -- Per-position compat table: compatibility[pid][dir] = number of tiles in
 -- the direction-dir neighbour of this position that still support pid
@@ -43,14 +38,14 @@ data CompatibilityKey
 -- tree with only `P` entries and an inner table shared by reference across
 -- every position at `initWave`. Keeping `Pos` as the outer key (below, in
 -- `Wave`'s own `compatibility` field) preserves that sharing.)
-type CompatibilityCell = CompatibilityMap CompatibilityKey Int
+type CompatibilityCell = CompatibilityMap
 
 -- Fold (pid, dir) into `CompatibilityCell`'s single combined key. Doesn't
 -- depend on grid size/position, so a computed key stays valid across a
 -- `resizeWave`; kept positions' `CompatibilityCell`s carry over unchanged,
 -- same as `cells`.
-compatibilityKey :: PatternId -> Direction -> CompatibilityMapKey CompatibilityKey
-compatibilityKey (PatternId pid) dir = CompatibilityMapKey (pid * 4 + dirIndex dir)
+compatibilityKey :: PatternId -> Direction -> CompatibilityKey
+compatibilityKey (PatternId pid) dir = CompatibilityKey (pid * 4 + dirIndex dir)
 
 -- Running totals behind a cell's Shannon entropy (`entropyFromStats` below),
 -- kept incrementally in sync with `cells` by every single ban (see
