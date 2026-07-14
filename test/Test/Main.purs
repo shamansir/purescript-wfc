@@ -26,7 +26,7 @@ import WFC.Rules (AdjacencyRules, buildRules, lookupNeighbors)
 import WFC.Wave (Wave, getCellPossibilities, initWave, isFullyCollapsed, resizeWave)
 import WFC.Entropy (cellEntropy, cellsWithEntropy, minEntropyPos)
 import WFC.Collapse (collapseAt)
-import WFC.Propagate (applyGround, getCompat, propagate)
+import WFC.Propagate (applyGround, getCompatibility, propagate)
 import WFC.Algorithm (wfc, wfcWithRetry)
 import WFC.Backtrack (StepResult(..), solveWithBacktracking, stepSearch)
 import WFC.Render (renderWave, renderWaveWith)
@@ -467,8 +467,9 @@ main = runSpecAndExitProcess [consoleReporter] do
       isFullyCollapsed wave `shouldEqual` true
 
     it "resizeWave carries compat counts over correctly when the grid width changes" do
-      -- CompatMap is `Pos`-keyed (see WFC.Wave.CompatMap/CompatCell) same
-      -- as `cells`, so a kept position's compat entry should survive a
+      -- Wave's `compatibility` field is `Pos`-keyed (see
+      -- WFC.Wave.CompatibilityCell), same as `cells`, so a kept position's
+      -- compat entry should survive a
       -- resize completely unchanged, including a WIDTH change (not just
       -- height) — regression coverage against a prior version that folded
       -- position into the compat key itself, which needed (and easily
@@ -484,7 +485,7 @@ main = runSpecAndExitProcess [consoleReporter] do
                 pid <- [ p0, p1 ]
                 dir <- allDirections
                 pure (Tuple p (Tuple pid dir))
-              compatOf w = map (\(Tuple p (Tuple pid dir)) -> getCompat w p pid dir) triples
+              compatOf w = map (\(Tuple p (Tuple pid dir)) -> getCompatibility w p pid dir) triples
               before = compatOf wave1
               wave2  = resizeWave { width: 4, height: 2 } wave1
               after  = compatOf wave2
@@ -493,7 +494,7 @@ main = runSpecAndExitProcess [consoleReporter] do
           -- a position that only exists after widening starts fresh (same
           -- as a brand-new initWave's value), not from some leftover entry
           -- that happened to collide under the old width's key encoding
-          getCompat wave2 (pos 3 0) p0 DirR `shouldEqual` getCompat wave0 (pos 0 0) p0 DirR
+          getCompatibility wave2 (pos 3 0) p0 DirR `shouldEqual` getCompatibility wave0 (pos 0 0) p0 DirR
 
   -- =========================================================================
   describe "Stage 4 · entropy — measure uncertainty; pick the cell to observe next" do

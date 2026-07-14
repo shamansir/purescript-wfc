@@ -15,7 +15,7 @@ import WFC.Direction (Direction, allDirections, opposite)
 import WFC.Grid (Pos(..), neighborPos, allPositions)
 import WFC.Pattern (PatternId)
 import WFC.Rules (lookupNeighbors)
-import WFC.Wave (Cell, Wave, compatInnerKey)
+import WFC.Wave (Cell, Wave, compatibilityKey)
 
 newtype Contradiction = Contradiction Pos
 
@@ -31,21 +31,21 @@ type PropState a =
   }
 
 -- Read the compat count for (pos, pid, dir).
-getCompat :: forall a. Wave a -> Pos -> PatternId -> Direction -> Int
-getCompat wave pos pid dir =
+getCompatibility :: forall a. Wave a -> Pos -> PatternId -> Direction -> Int
+getCompatibility wave pos pid dir =
   fromMaybe 0 $ do
-    cell <- Map.lookup pos wave.compat
-    CompatibilityMap.lookup (compatInnerKey pid dir) cell
+    cell <- Map.lookup pos wave.compatibility
+    CompatibilityMap.lookup (compatibilityKey pid dir) cell
 
 -- Decrement the compat count for (pos, pid, dir); return new count + updated wave.
-decrementCompat
+decrementCompatibility
   :: forall a
   .  Pos -> PatternId -> Direction -> Wave a -> Tuple Int (Wave a)
-decrementCompat pos pid dir wave =
-  let key       = compatInnerKey pid dir
-      newCount  = getCompat wave pos pid dir - 1
-      newCompat = Map.alter (map (CompatibilityMap.insert key newCount)) pos wave.compat
-  in Tuple newCount (wave { compat = newCompat })
+decrementCompatibility pos pid dir wave =
+  let key      = compatibilityKey pid dir
+      newCount = getCompatibility wave pos pid dir - 1
+      newCompatibility = Map.alter (map (CompatibilityMap.insert key newCount)) pos wave.compatibility
+  in Tuple newCount (wave { compatibility = newCompatibility })
 
 -- For each direction from pos, find neighbours that relied on pid
 -- and decrement their compat counts, enqueuing new bans where count hits 0.
@@ -67,7 +67,7 @@ processNeighbours pid pos wave0 queue0 =
           in Array.foldl (stepTile nPos dir) st supported
 
     stepTile nPos dir st nPid =
-      let Tuple newCount wave' = decrementCompat nPos nPid (opposite dir) st.wave
+      let Tuple newCount wave' = decrementCompatibility nPos nPid (opposite dir) st.wave
       in if newCount == 0
            then st { wave = wave', queue = (Tuple nPos nPid) : st.queue }
            else st { wave = wave' }
