@@ -12,6 +12,7 @@ import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import Demo.Samples (SampleDef)
 import WFC.Catalog (PatternCatalog, patternIds, patternsWithIds)
+import WFC.PatternMap as PatternMap
 import WFC.Grid (Pos(..))
 import WFC.Pattern (Pattern(..), PatternId(..))
 import WFC.Render (topLeftPixel)
@@ -129,7 +130,7 @@ buildIntCatalogFromTileSet def =
     built = buildTileSet def
     entries = patternsWithIds built.catalog :: Array (Tuple PatternId (Pattern TileInstance))
     intOf (PatternId i) = i
-    newPatterns = map (\(Tuple pid _) -> Pattern [ intOf pid ]) entries
+    newPatterns = PatternMap.fromArray (map (\(Tuple pid _) -> Pattern [ intOf pid ]) entries)
     catalog = built.catalog { patterns = newPatterns }
     refsByInt :: Map Int TileRef
     refsByInt = Map.fromFoldable

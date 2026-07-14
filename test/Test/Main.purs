@@ -22,6 +22,7 @@ import WFC.Catalog (PatternCatalog, extractPatterns, lastPatternId)
 import WFC.Direction (Direction(..), allDirections, opposite)
 import WFC.Grid (Pos(..), allPositions, neighborPos)
 import WFC.Pattern (Pattern(..), PatternId(..), agrees, reflect, rotate)
+import WFC.PatternMap as PatternMap
 import WFC.Rules (AdjacencyRules, buildRules, lookupNeighbors)
 import WFC.Wave (Wave, getCellPossibilities, initWave, isFullyCollapsed, resizeWave)
 import WFC.Entropy (cellEntropy, cellsWithEntropy, minEntropyPos)
@@ -341,14 +342,14 @@ main = runSpecAndExitProcess [consoleReporter] do
 
     it "a uniform grid yields exactly 1 unique pattern" do
       let cat = extractPatterns 2 false false false uniform3x3
-      Array.length cat.patterns `shouldEqual` 1
+      PatternMap.length cat.patterns `shouldEqual` 1
 
     it "a checkerboard yields exactly 2 unique patterns" do
-      Array.length checkerCatalog.patterns `shouldEqual` 2
+      PatternMap.length checkerCatalog.patterns `shouldEqual` 2
 
     it "horizontal stripes yield exactly 2 unique patterns" do
       let cat = extractPatterns 2 false false false stripes3x3
-      Array.length cat.patterns `shouldEqual` 2
+      PatternMap.length cat.patterns `shouldEqual` 2
 
     it "totalW equals the number of tiles extracted (frequency accounting)" do
       -- 3×3 grid, n=2, non-periodic → 4 tiles; uniform: all same → weight 4
@@ -365,7 +366,7 @@ main = runSpecAndExitProcess [consoleReporter] do
     it "periodic mode wraps the sample and finds more tiles" do
       -- 2×2 periodic checkerboard: all 4 wrapping positions give the 2 patterns
       let cat = extractPatterns 2 true false false [[0,1],[1,0]]
-      Array.length cat.patterns `shouldEqual` 2
+      PatternMap.length cat.patterns `shouldEqual` 2
 
     -- A single 2×2 window with 4 distinct pixel values: no rotation or
     -- reflection of it ever coincides with another, so each toggle's
@@ -374,19 +375,19 @@ main = runSpecAndExitProcess [consoleReporter] do
     -- internals being separately correct.
     it "with rotations off and mirror off, only the original window is extracted" do
       let cat = extractPatterns 2 false false false asymGrid
-      Array.length cat.patterns `shouldEqual` 1
+      PatternMap.length cat.patterns `shouldEqual` 1
 
     it "with rotations on, all 4 rotations of an asymmetric window are extracted" do
       let cat = extractPatterns 2 false true false asymGrid
-      Array.length cat.patterns `shouldEqual` 4
+      PatternMap.length cat.patterns `shouldEqual` 4
 
     it "with mirror on, the original and its reflection are extracted" do
       let cat = extractPatterns 2 false false true asymGrid
-      Array.length cat.patterns `shouldEqual` 2
+      PatternMap.length cat.patterns `shouldEqual` 2
 
     it "with both rotations and mirror on, all 8 dihedral variants are extracted" do
       let cat = extractPatterns 2 false true true asymGrid
-      Array.length cat.patterns `shouldEqual` 8
+      PatternMap.length cat.patterns `shouldEqual` 8
 
     it "with neither toggle, no pattern is marked as a rotation/mirror-only origin" do
       let cat = extractPatterns 2 false false false asymGrid
@@ -725,7 +726,7 @@ main = runSpecAndExitProcess [consoleReporter] do
             if Set.size s == 1
               then Array.head (Set.toUnfoldable s :: Array PatternId)
               else Nothing
-          patternOf (PatternId pid) = fromMaybe (Pattern []) (Array.index cat.patterns pid)
+          patternOf pid = fromMaybe (Pattern []) (PatternMap.index cat.patterns pid)
 
       result <- liftEffect $ solveWithBacktracking 5000 wave
       case result of
@@ -758,13 +759,13 @@ main = runSpecAndExitProcess [consoleReporter] do
   -- overlap), everything downstream is identical.
 
     it "one PatternId per tile, size 1 (a tile is a single value, not an NxN block)" do
-      Array.length tileCatalog.patterns `shouldEqual` 4
+      PatternMap.length tileCatalog.patterns `shouldEqual` 4
       tileCatalog.size `shouldEqual` 1
 
     it "weights come directly from the tile def, not an occurrence count" do
       tileCatalog.totalW `shouldEqual` 11.0 -- 6 + 2 + 2 + 1
-      Array.index tileCatalog.weights 0 `shouldEqual` Just 6.0
-      Array.index tileCatalog.weights 3 `shouldEqual` Just 1.0
+      PatternMap.index tileCatalog.weights p0 `shouldEqual` Just 6.0
+      PatternMap.index tileCatalog.weights (PatternId 3) `shouldEqual` Just 1.0
 
     it "blank (right=0) can neighbor any tile whose left socket is 0, not horiz (left=1)" do
       let neighbors = Array.sort $ lookupNeighbors tileRules DirR (PatternId 0)
@@ -950,12 +951,12 @@ main = runSpecAndExitProcess [consoleReporter] do
         tileName (TS.TileInstance t) = t.name
 
       it "catalog has one PatternId per (tile, distinct orientation)" do
-        Array.length built.catalog.patterns `shouldEqual` 5 -- 1 (blank, X) + 4 (corner, L)
+        PatternMap.length built.catalog.patterns `shouldEqual` 5 -- 1 (blank, X) + 4 (corner, L)
         built.catalog.size `shouldEqual` 1
 
       it "every orientation of a tile keeps that tile's own declared weight" do
         let entries = Map.toUnfoldable built.index :: Array (Tuple TS.TileInstance PatternId)
-            weightOf ti = Array.findMap (\(Tuple ti' (PatternId pid)) -> if ti' == ti then Array.index built.catalog.weights pid else Nothing) entries
+            weightOf ti = Array.findMap (\(Tuple ti' pid) -> if ti' == ti then PatternMap.index built.catalog.weights pid else Nothing) entries
             cornerWeights = Array.mapMaybe (\(Tuple ti _) -> if tileName ti == "corner" then weightOf ti else Nothing) entries
         Array.length cornerWeights `shouldEqual` 4
         all (_ == 2.0) cornerWeights `shouldEqual` true

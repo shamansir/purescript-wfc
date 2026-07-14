@@ -35,6 +35,7 @@ import Demo.WorkerProtocol as WP
 import Demo.XmlTileSamples (xmlTileSamples)
 import WFC.Catalog (PatternCatalog, extractPatterns, lastPatternId, patternsWithIds)
 import WFC.Pattern (Pattern(..), PatternId)
+import WFC.PatternMap as PatternMap
 import WFC.Propagate (applyGround)
 import WFC.Rules (buildRules)
 import WFC.Tiles (buildTiledCatalog, buildTiledRules)
@@ -1360,7 +1361,7 @@ renderStats st =
   let catInfo = case st.catalog of
         Nothing  -> "No patterns"
         Just cat ->
-          show (Array.length cat.patterns) <> " patterns, size "
+          show (PatternMap.length cat.patterns) <> " patterns, size "
           <> show cat.size <> "×" <> show cat.size
       lastMs = fromMaybe 0.0 (Array.last st.stepTimes)
       segments = iterationStepCounts st.progressLog
@@ -1484,7 +1485,7 @@ renderPatterns st =
             [ HH.text
                 ( (if st.showPats then "▲ " else "▼ ")
                   <> (if patternsStale st then "~" else "")
-                  <> "Patterns (" <> show (Array.length cat.patterns) <> ")"
+                  <> "Patterns (" <> show (PatternMap.length cat.patterns) <> ")"
                 )
             ]
         , if st.showPats

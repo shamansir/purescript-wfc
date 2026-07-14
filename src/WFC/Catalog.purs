@@ -3,7 +3,7 @@ module WFC.Catalog where
 import Prelude
 
 import Data.Array as Array
-import Data.Foldable (foldl)
+import Data.Foldable (foldl, sum)
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe, fromJust)
@@ -11,6 +11,8 @@ import Data.Number (log)
 import Data.Tuple (Tuple(..))
 import Partial.Unsafe (unsafePartial)
 import WFC.Pattern (Pattern(..), PatternId(..), VariantTag, taggedVariantsFor)
+import WFC.PatternMap (PatternMap)
+import WFC.PatternMap as PatternMap
 
 -- Whether a catalog pattern only exists because of the rotation/mirror
 -- symmetry options, and if so, which transform(s) produced it. A pattern
@@ -21,23 +23,15 @@ type PatternOrigin = { rotated :: Boolean, mirrored :: Boolean }
 -- All pattern data derived from the input sample.
 -- Constructed only via extractPatterns.
 --
--- `patterns`/`weights`/`wLogW` are `Array`s, not `Map PatternId x` — since
--- `PatternId` is contiguous `0..T-1` by construction (see `accumulatePattern`,
--- which only ever assigns the next sequential id), a `PatternId`'s own
--- underlying `Int` *is* its index, so a plain `Array` gives O(1) access
--- (`patternOf`/`weightOf`/`wLogWOf` below) instead of a `Map`'s O(log T)
--- tree lookup — for free, since this table is built once (`finalize`) and
--- never mutated again, unlike `WFC.Wave`'s per-cell compatibility/entropy
--- state (see `docs/Optimisations.md`, where the same `Array`-vs-`Map`
--- tradeoff pointed the other way *because* those are mutated thousands of
--- times per solve and must stay cheap to snapshot for backtracking — this
--- table has neither concern). `origins` stays `Map`-backed: it's sparse
--- (most patterns have no entry) and only read for display purposes
--- (pattern-thumbnail badges), never on the solving hot path.
+-- `origins` stays `Map PatternId`-backed rather than a `PatternMap`: it's
+-- sparse (most patterns have no entry) and only read for display purposes
+-- (pattern-thumbnail badges), never on the solving hot path — see
+-- `WFC.PatternMap`'s own docs for why a dense, read-only table like
+-- `patterns`/`weights`/`wLogW` wants a `PatternMap` instead.
 type PatternCatalog a =
-  { patterns     :: Array (Pattern a)           -- index = id → pixel data
-  , weights      :: Array Number                -- index = id → frequency count
-  , wLogW        :: Array Number                -- index = id → weight * ln(weight)
+  { patterns     :: PatternMap (Pattern a)
+  , weights      :: PatternMap Number
+  , wLogW        :: PatternMap Number
   , size         :: Int                         -- N (pattern is N×N)
   , totalW       :: Number                      -- Σ weights
   , totalWLogW   :: Number                      -- Σ (w * ln w)
@@ -47,25 +41,23 @@ type PatternCatalog a =
 
 -- Every `PatternId` in the catalog, in order (id 0, 1, 2, ...).
 patternIds :: forall a. PatternCatalog a -> Array PatternId
-patternIds catalog =
-  let t = Array.length catalog.patterns
-  in if t <= 0 then [] else map PatternId (Array.range 0 (t - 1))
+patternIds catalog = PatternMap.ids catalog.patterns
 
--- Same shape `Map.toUnfoldable catalog.patterns :: Array (Tuple PatternId _)`
--- used to have — a drop-in replacement at call sites that want every
--- pattern tagged with its own id (rendering a pattern list, etc.), not just
--- looking one up.
+-- Every pattern tagged with its own id — a drop-in replacement for the
+-- `Array (Tuple PatternId _)` shape `Data.Map.toUnfoldable` used to hand
+-- back, at call sites that want every pattern alongside its id (rendering
+-- a pattern list, etc.), not just looking one up.
 patternsWithIds :: forall a. PatternCatalog a -> Array (Tuple PatternId (Pattern a))
-patternsWithIds catalog = Array.mapWithIndex (\i pat -> Tuple (PatternId i) pat) catalog.patterns
+patternsWithIds catalog = PatternMap.withIds catalog.patterns
 
 patternOf :: forall a. PatternCatalog a -> PatternId -> Maybe (Pattern a)
-patternOf catalog (PatternId i) = Array.index catalog.patterns i
+patternOf catalog pid = PatternMap.index catalog.patterns pid
 
 weightOf :: forall a. PatternCatalog a -> PatternId -> Number
-weightOf catalog (PatternId i) = fromMaybe 0.0 (Array.index catalog.weights i)
+weightOf catalog pid = fromMaybe 0.0 (PatternMap.index catalog.weights pid)
 
 wLogWOf :: forall a. PatternCatalog a -> PatternId -> Number
-wLogWOf catalog (PatternId i) = fromMaybe 0.0 (Array.index catalog.wLogW i)
+wLogWOf catalog pid = fromMaybe 0.0 (PatternMap.index catalog.wLogW pid)
 
 -- Per-pattern bookkeeping while accumulating: has this exact pixel content
 -- ever been seen as a base (untransformed) window, and has it ever been
@@ -118,14 +110,14 @@ finalize acc n =
   -- `acc.patterns`/`acc.weights` are `Map PatternId x` with contiguous
   -- `0..T-1` keys (by construction), so `Map.toUnfoldable` — guaranteed
   -- ascending-by-key — hands them back already in the right order to just
-  -- drop the keys and keep the values as a dense `Array`.
+  -- drop the keys and freeze the values into a `PatternMap`.
   let patternPairs = Map.toUnfoldable acc.patterns :: Array (Tuple PatternId (Pattern a))
       weightPairs  = Map.toUnfoldable acc.weights :: Array (Tuple PatternId Number)
-      patterns   = map (\(Tuple _ pat) -> pat) patternPairs
-      weights    = map (\(Tuple _ w) -> w) weightPairs
+      patterns   = PatternMap.fromArray (map (\(Tuple _ pat) -> pat) patternPairs)
+      weights    = PatternMap.fromArray (map (\(Tuple _ w) -> w) weightPairs)
       wLogW      = map (\w -> w * log w) weights
-      totalW     = foldl (+) 0.0 weights
-      totalWLogW = foldl (+) 0.0 wLogW
+      totalW     = sum weights
+      totalWLogW = sum wLogW
       startEntropy =
         if totalW > 0.0
           then log totalW - totalWLogW / totalW
@@ -187,5 +179,5 @@ extractPatterns n periodic useRotations useMirror grid =
 -- row-major scan (see the `positions`/`allVariants` order above).
 lastPatternId :: forall a. PatternCatalog a -> Maybe PatternId
 lastPatternId cat =
-  let n = Array.length cat.patterns
+  let n = PatternMap.length cat.patterns
   in if n == 0 then Nothing else Just (PatternId (n - 1))
