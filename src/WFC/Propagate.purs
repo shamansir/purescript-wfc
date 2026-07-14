@@ -87,7 +87,16 @@ processBan (Tuple pos pid) st =
           let newPids = Set.delete pid pids
               newCell :: Cell
               newCell = if Set.isEmpty newPids then Nothing else Just newPids
-              wave'   = st.wave { cells = Map.insert pos newCell st.wave.cells }
+              -- Keep the entropy cache in lockstep with `cells`, one banned
+              -- pattern's weight/wLogW at a time, instead of ever re-summing
+              -- a cell's whole possibility set (see WFC.Wave.EntropyStats).
+              w        = fromMaybe 0.0 (Map.lookup pid st.wave.catalog.weights)
+              wlw      = fromMaybe 0.0 (Map.lookup pid st.wave.catalog.wLogW)
+              newEntropy = Map.update
+                (\stats -> Just { sumW: stats.sumW - w, sumWLogW: stats.sumWLogW - wlw })
+                pos
+                st.wave.entropy
+              wave'   = st.wave { cells = Map.insert pos newCell st.wave.cells, entropy = newEntropy }
           in case newCell of
                Nothing -> Left (Contradiction pos)
                Just _  -> Right (processNeighbours pid pos wave' st.queue)

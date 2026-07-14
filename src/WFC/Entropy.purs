@@ -3,7 +3,7 @@ module WFC.Entropy where
 import Prelude
 
 import Data.Array as Array
-import Data.Foldable (foldl, minimumBy)
+import Data.Foldable (minimumBy)
 import Data.Map as Map
 import Data.Maybe (Maybe(..))
 import Data.Set as Set
@@ -11,26 +11,24 @@ import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Random (random)
-import Data.Number (log)
 import WFC.Grid (Pos)
 import WFC.Pattern (PatternId)
-import WFC.Wave (Wave)
+import WFC.Wave (Wave, entropyFromStats, statsForSet)
 
--- Shannon entropy of a cell given the catalog's weight table.
--- H = ln(Σw) - (Σ w*ln(w)) / Σw, computed from scratch each time.
+-- Shannon entropy of an arbitrary possibility set, given the catalog's
+-- weight table — H = ln(Σw) - (Σ w*ln(w)) / Σw, summed from `possible`
+-- itself every call (this is the general-purpose entrypoint for a
+-- hypothetical/explicit set; `cellsWithEntropy` below uses the wave's
+-- incrementally-maintained cache instead, since it always wants a cell's
+-- *actual current* possibilities).
 cellEntropy :: forall a. Wave a -> Set.Set PatternId -> Number
-cellEntropy wave possible =
-  let ws     = map (\pid -> case Map.lookup pid wave.catalog.weights of
-                               Just w  -> w
-                               Nothing -> 0.0)
-                   (Set.toUnfoldable possible :: Array PatternId)
-      totalW = foldl (+) 0.0 ws
-      sumWLW = foldl (\acc w -> acc + w * log w) 0.0 ws
-  in if totalW > 0.0
-       then log totalW - sumWLW / totalW
-       else 0.0
+cellEntropy wave possible = entropyFromStats (statsForSet wave.catalog possible)
 
--- All non-collapsed, non-contradiction cells with their entropy.
+-- All non-collapsed, non-contradiction cells with their entropy. Reads each
+-- cell's entropy from `wave.entropy` (kept up to date one ban at a time by
+-- WFC.Propagate.processBan) instead of re-summing that cell's whole
+-- possibility set here — this is what makes calling `minEntropyPos` once
+-- per solving step cheap regardless of how many patterns remain possible.
 cellsWithEntropy :: forall a. Wave a -> Array (Tuple Pos Number)
 cellsWithEntropy wave =
   Array.mapMaybe go (Map.toUnfoldable wave.cells :: Array (Tuple Pos _))
@@ -39,7 +37,15 @@ cellsWithEntropy wave =
     go (Tuple pos (Just s)) =
       if Set.size s <= 1
         then Nothing  -- collapsed or empty; skip
-        else Just (Tuple pos (cellEntropy wave s))
+        else Just (Tuple pos (entropyOf pos s))
+
+    -- Falls back to a direct recompute if a position is somehow missing
+    -- from the cache (shouldn't happen — every `cells` mutation site keeps
+    -- `entropy` in lockstep — but this keeps `cellsWithEntropy` correct
+    -- rather than silently wrong if that invariant is ever broken).
+    entropyOf pos s = case Map.lookup pos wave.entropy of
+      Just stats -> entropyFromStats stats
+      Nothing    -> cellEntropy wave s
 
 -- Position with minimum entropy, with small random noise for tie-breaking.
 -- Returns Nothing when all cells are collapsed (algorithm complete).
