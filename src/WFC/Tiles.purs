@@ -8,7 +8,8 @@ import Data.Maybe (Maybe(..))
 import Data.Tuple (Tuple(..))
 import WFC.Catalog (Accum, PatternCatalog, finalize)
 import WFC.Direction (Direction(..), allDirections)
-import WFC.Pattern (Pattern(..), PatternId(..))
+import WFC.Pattern (Pattern(..), PatternId(..), PatternSize(..))
+import WFC.PatternMap (PatternCount(..))
 import WFC.Rules (AdjacencyRules, fromNestedMap)
 
 -- The classic Wang-tile mechanism: a tile's compatibility with its
@@ -52,13 +53,18 @@ buildTiledCatalog tileDefs =
       patterns = Map.fromFoldable (map (\(Tuple pid t) -> Tuple pid (Pattern [t.value])) indexed)
       weights  = Map.fromFoldable (map (\(Tuple pid t) -> Tuple pid t.weight) indexed)
       acc      = { nextId: Array.length tileDefs, byPixels: Map.empty, patterns, weights, origins: Map.empty } :: Accum a
-  in finalize acc 1
+  in finalize acc (PatternSize 1)
 
-sidesMatch :: forall a. Direction -> TileDef a -> TileDef a -> Boolean
-sidesMatch DirR a b = a.sockets.right == b.sockets.left
-sidesMatch DirL a b = a.sockets.left  == b.sockets.right
-sidesMatch DirD a b = a.sockets.down  == b.sockets.up
-sidesMatch DirU a b = a.sockets.up    == b.sockets.down
+newtype SidesMatch = SidesMatch Boolean
+
+derive newtype instance eqSidesMatch :: Eq SidesMatch
+derive newtype instance showSidesMatch :: Show SidesMatch
+
+sidesMatch :: forall a. Direction -> TileDef a -> TileDef a -> SidesMatch
+sidesMatch DirR a b = SidesMatch (a.sockets.right == b.sockets.left)
+sidesMatch DirL a b = SidesMatch (a.sockets.left  == b.sockets.right)
+sidesMatch DirD a b = SidesMatch (a.sockets.down  == b.sockets.up)
+sidesMatch DirU a b = SidesMatch (a.sockets.up    == b.sockets.down)
 
 -- Derive adjacency rules from socket compatibility instead of the
 -- overlapping model's pixel-overlap agreement (`WFC.Pattern.agrees`).
@@ -67,11 +73,13 @@ buildTiledRules tileDefs =
   let indexed = Array.mapWithIndex (\i t -> Tuple (PatternId i) t) tileDefs
       compatibleWith dir tileA =
         Array.mapMaybe
-          (\(Tuple pidB tileB) -> if sidesMatch dir tileA tileB then Just pidB else Nothing)
+          (\(Tuple pidB tileB) -> case sidesMatch dir tileA tileB of
+             SidesMatch true  -> Just pidB
+             SidesMatch false -> Nothing)
           indexed
       forDir dir =
         Map.fromFoldable $ map
           (\(Tuple pid tileA) -> Tuple pid (compatibleWith dir tileA))
           indexed
       byDir = Map.fromFoldable $ map (\dir -> Tuple dir (forDir dir)) allDirections
-  in fromNestedMap (Array.length tileDefs) byDir
+  in fromNestedMap (PatternCount (Array.length tileDefs)) byDir

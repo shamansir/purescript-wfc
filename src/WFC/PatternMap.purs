@@ -1,5 +1,6 @@
 module WFC.PatternMap
   ( PatternMap
+  , PatternCount(..)
   , empty
   , length
   , index
@@ -38,11 +39,21 @@ newtype PatternMap x = PatternMap (Array x)
 derive instance functorPatternMap :: Functor PatternMap
 derive newtype instance foldablePatternMap :: Foldable PatternMap
 
+-- | T, the total number of patterns in a catalog — distinct from
+-- | `WFC.Pattern.PatternSize` ("N", a single pattern's own width/height),
+-- | a pair of concepts the original WFC literature itself distinguishes
+-- | (N vs. T) but that are easy to mix up as bare `Int`s.
+newtype PatternCount = PatternCount Int
+
+derive newtype instance eqPatternCount :: Eq PatternCount
+derive newtype instance ordPatternCount :: Ord PatternCount
+derive newtype instance showPatternCount :: Show PatternCount
+
 empty :: forall x. PatternMap x
 empty = PatternMap []
 
-length :: forall x. PatternMap x -> Int
-length (PatternMap arr) = Array.length arr
+length :: forall x. PatternMap x -> PatternCount
+length (PatternMap arr) = PatternCount (Array.length arr)
 
 index :: forall x. PatternMap x -> PatternId -> Maybe x
 index (PatternMap arr) (PatternId i) = Array.index arr i

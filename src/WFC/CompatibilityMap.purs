@@ -1,6 +1,7 @@
 module WFC.CompatibilityMap
   ( CompatibilityMap
   , CompatibilityKey(..)
+  , CompatibilityCount(..)
   , empty
   , lookup
   , insert
@@ -23,6 +24,7 @@ newtype CompatibilityKey = CompatibilityKey Int
 
 derive newtype instance eqCompatibilityKey :: Eq CompatibilityKey
 derive newtype instance ordCompatibilityKey :: Ord CompatibilityKey
+derive newtype instance showCompatibilityKey :: Show CompatibilityKey
 
 -- | compat[pid][dir] = how many tiles in the direction-dir neighbour of a
 -- | position still support pid being there — see `WFC.Wave`'s
@@ -39,16 +41,26 @@ derive newtype instance ordCompatibilityKey :: Ord CompatibilityKey
 -- | has no such sharing in PureScript (`Data.Array.updateAt` copies the
 -- | entire array via `Array.prototype.slice`), so it would turn every
 -- | single update into a full copy.
-newtype CompatibilityMap = CompatibilityMap (Map CompatibilityKey Int)
+newtype CompatibilityMap = CompatibilityMap (Map CompatibilityKey CompatibilityCount)
+
+-- | How many tiles in some direction-dir neighbour still support a given
+-- | pattern being at the current cell — the value `CompatibilityMap`
+-- | stores, wrapped so it can't be confused with an unrelated `Int` (a
+-- | pattern id, a direction index, ...) at a call site.
+newtype CompatibilityCount = CompatibilityCount Int
+
+derive newtype instance eqCompatibilityCount :: Eq CompatibilityCount
+derive newtype instance ordCompatibilityCount :: Ord CompatibilityCount
+derive newtype instance showCompatibilityCount :: Show CompatibilityCount
 
 empty :: CompatibilityMap
 empty = CompatibilityMap Map.empty
 
-lookup :: CompatibilityKey -> CompatibilityMap -> Maybe Int
+lookup :: CompatibilityKey -> CompatibilityMap -> Maybe CompatibilityCount
 lookup k (CompatibilityMap m) = Map.lookup k m
 
-insert :: CompatibilityKey -> Int -> CompatibilityMap -> CompatibilityMap
+insert :: CompatibilityKey -> CompatibilityCount -> CompatibilityMap -> CompatibilityMap
 insert k v (CompatibilityMap m) = CompatibilityMap (Map.insert k v m)
 
-fromFoldable :: forall f. Foldable f => f (Tuple CompatibilityKey Int) -> CompatibilityMap
+fromFoldable :: forall f. Foldable f => f (Tuple CompatibilityKey CompatibilityCount) -> CompatibilityMap
 fromFoldable = CompatibilityMap <<< Map.fromFoldable

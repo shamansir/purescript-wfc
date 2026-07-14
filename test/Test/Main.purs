@@ -18,23 +18,25 @@ import Test.Spec.Assertions (fail, shouldEqual, shouldSatisfy)
 import Test.Spec.Reporter.Console (consoleReporter)
 import Test.Spec.Runner.Node (runSpecAndExitProcess)
 
-import WFC.Catalog (PatternCatalog, extractPatterns, lastPatternId)
+import WFC.Catalog (InputPeriodic(..), PatternCatalog, extractPatterns, lastPatternId)
 import WFC.Direction (Direction(..), allDirections, opposite)
-import WFC.Grid (Pos(..), allPositions, neighborPos)
-import WFC.Pattern (Pattern(..), PatternId(..), agrees, reflect, rotate)
+import WFC.Grid (OutputPeriodic(..), Pos(..), allPositions, neighborPos)
+import WFC.Pattern (Agrees(..), Pattern(..), PatternId(..), PatternSize(..), UseMirror(..), UseRotations(..), agrees, reflect, rotate)
+import WFC.PatternMap (PatternCount(..))
 import WFC.PatternMap as PatternMap
 import WFC.Rules (AdjacencyRules, buildRules, lookupNeighbors)
-import WFC.Wave (Wave, getCellPossibilities, initWave, isFullyCollapsed, resizeWave)
+import WFC.Wave (Entropy(..), FullyCollapsed(..), Wave, getCellPossibilities, initWave, isFullyCollapsed, resizeWave)
 import WFC.Entropy (cellEntropy, cellsWithEntropy, minEntropyPos)
 import WFC.Collapse (collapseAt)
-import WFC.Propagate (applyGround, getCompatibility, propagate)
+import WFC.Propagate (MaxAttempts(..), applyGround, getCompatibility, propagate)
 import WFC.Algorithm (wfc, wfcWithRetry)
 import WFC.Backtrack (StepResult(..), solveWithBacktracking, stepSearch)
 import WFC.Render (renderWave, renderWaveWith)
-import WFC.Tiles (TileDef, buildTiledCatalog, buildTiledRules, sidesMatch)
+import WFC.Tiles (TileDef, SidesMatch(..), buildTiledCatalog, buildTiledRules, sidesMatch)
 import WFC.TileSet as TS
-import WFC.TileSet.Symmetry (Symmetry(..), cardinality, distinctOrientations, parseSymmetry, rotateIndex, rotateIndexBy)
-import WFC.TileSet.Xml (parseTileSetXml)
+import WFC.TileSet (TileName(..))
+import WFC.TileSet.Symmetry (OrientationCount(..), OrientationIndex(..), RotationSteps(..), Symmetry(..), cardinality, distinctOrientations, parseSymmetry, rotateIndex, rotateIndexBy)
+import WFC.TileSet.Xml (XmlSource(..), XmlParseError(..), parseTileSetXml)
 
 -- ---------------------------------------------------------------------------
 -- Test fixtures
@@ -81,14 +83,14 @@ asymGrid =
 -- Pre-built catalog and rules for the checkerboard fixture.
 -- P0 = PatternId 0, P1 = PatternId 1 (extraction order is deterministic).
 checkerCatalog :: PatternCatalog Int
-checkerCatalog = extractPatterns 2 false false false checker3x3
+checkerCatalog = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror false) checker3x3
 
 checkerRules :: AdjacencyRules
 checkerRules = buildRules checkerCatalog
 
 -- 2×2 wave seeded from the checkerboard: every cell starts as {P0, P1}.
 checker2x2Wave :: Wave Int
-checker2x2Wave = initWave checkerCatalog checkerRules { width: 2, height: 2 } false
+checker2x2Wave = initWave checkerCatalog checkerRules { width: 2, height: 2 } (OutputPeriodic false)
 
 -- Convenience aliases
 p0 :: PatternId
@@ -260,23 +262,23 @@ main = runSpecAndExitProcess [consoleReporter] do
     describe "rotate 90° clockwise — new(x,y) = old(y, n-1-x)" do
 
       it "rotates a 2×2 tile: [[1,2],[3,4]] → [[3,1],[4,2]]" do
-        let Pattern px = rotate 2 (Pattern [1, 2, 3, 4])
+        let Pattern px = rotate (PatternSize 2) (Pattern [1, 2, 3, 4])
         px `shouldEqual` [3, 1, 4, 2]
 
       it "four rotations return to the original" do
         let p  = Pattern [1, 2, 3, 4]
-            r4 = rotate 2 (rotate 2 (rotate 2 (rotate 2 p)))
+            r4 = rotate (PatternSize 2) (rotate (PatternSize 2) (rotate (PatternSize 2) (rotate (PatternSize 2) p)))
         r4 `shouldEqual` p
 
     describe "reflect horizontally — new(x,y) = old(n-1-x, y)" do
 
       it "reflects a 2×2 tile: [[1,2],[3,4]] → [[2,1],[4,3]]" do
-        let Pattern px = reflect 2 (Pattern [1, 2, 3, 4])
+        let Pattern px = reflect (PatternSize 2) (Pattern [1, 2, 3, 4])
         px `shouldEqual` [2, 1, 4, 3]
 
       it "two reflections return to the original" do
         let p = Pattern [1, 2, 3, 4]
-        reflect 2 (reflect 2 p) `shouldEqual` p
+        reflect (PatternSize 2) (reflect (PatternSize 2) p) `shouldEqual` p
 
     describe "agrees — overlap-region compatibility check" do
       -- Checkerboard patterns:
@@ -284,15 +286,15 @@ main = runSpecAndExitProcess [consoleReporter] do
       -- Their right/left columns interlock perfectly: P0's right col = P1's left col.
 
       it "P0 right of P0 is incompatible (same column, values differ)" do
-        agrees 2 DirR (Pattern [0,1,1,0]) (Pattern [0,1,1,0]) `shouldEqual` false
+        agrees (PatternSize 2) DirR (Pattern [0,1,1,0]) (Pattern [0,1,1,0]) `shouldEqual` Agrees false
 
       it "P0 right of P1 is compatible (columns match)" do
-        agrees 2 DirR (Pattern [0,1,1,0]) (Pattern [1,0,0,1]) `shouldEqual` true
+        agrees (PatternSize 2) DirR (Pattern [0,1,1,0]) (Pattern [1,0,0,1]) `shouldEqual` Agrees true
 
       it "compatibility is symmetric across direction pairs: DirR ↔ DirL" do
         let p0' = Pattern [0,1,1,0]
             p1' = Pattern [1,0,0,1]
-        agrees 2 DirR p0' p1' `shouldEqual` agrees 2 DirL p1' p0'
+        agrees (PatternSize 2) DirR p0' p1' `shouldEqual` agrees (PatternSize 2) DirL p1' p0'
 
     it "Pattern is a Functor — map transforms every pixel independently" do
       map (_ * 2) (Pattern [1, 2, 3, 4]) `shouldEqual` Pattern [2, 4, 6, 8]
@@ -318,20 +320,20 @@ main = runSpecAndExitProcess [consoleReporter] do
   -- =========================================================================
 
     it "neighborPos at a left edge returns Nothing (non-periodic)" do
-      neighborPos { width: 3, height: 3 } false (pos 0 0) DirL `shouldEqual` Nothing
+      neighborPos { width: 3, height: 3 } (OutputPeriodic false) (pos 0 0) DirL `shouldEqual` Nothing
 
     it "neighborPos at a top edge returns Nothing (non-periodic)" do
-      neighborPos { width: 3, height: 3 } false (pos 0 0) DirU `shouldEqual` Nothing
+      neighborPos { width: 3, height: 3 } (OutputPeriodic false) (pos 0 0) DirU `shouldEqual` Nothing
 
     it "neighborPos in bounds returns Just the adjacent cell" do
-      neighborPos { width: 3, height: 3 } false (pos 1 1) DirR `shouldEqual` Just (pos 2 1)
-      neighborPos { width: 3, height: 3 } false (pos 1 1) DirD `shouldEqual` Just (pos 1 2)
+      neighborPos { width: 3, height: 3 } (OutputPeriodic false) (pos 1 1) DirR `shouldEqual` Just (pos 2 1)
+      neighborPos { width: 3, height: 3 } (OutputPeriodic false) (pos 1 1) DirD `shouldEqual` Just (pos 1 2)
 
     it "neighborPos wraps around left edge when periodic" do
-      neighborPos { width: 3, height: 3 } true (pos 0 0) DirL `shouldEqual` Just (pos 2 0)
+      neighborPos { width: 3, height: 3 } (OutputPeriodic true) (pos 0 0) DirL `shouldEqual` Just (pos 2 0)
 
     it "neighborPos wraps around top edge when periodic" do
-      neighborPos { width: 3, height: 3 } true (pos 0 0) DirU `shouldEqual` Just (pos 0 2)
+      neighborPos { width: 3, height: 3 } (OutputPeriodic true) (pos 0 0) DirU `shouldEqual` Just (pos 0 2)
 
     it "allPositions covers exactly width × height cells" do
       Array.length (allPositions { width: 4, height: 5 }) `shouldEqual` 20
@@ -341,19 +343,19 @@ main = runSpecAndExitProcess [consoleReporter] do
   -- =========================================================================
 
     it "a uniform grid yields exactly 1 unique pattern" do
-      let cat = extractPatterns 2 false false false uniform3x3
-      PatternMap.length cat.patterns `shouldEqual` 1
+      let cat = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror false) uniform3x3
+      PatternMap.length cat.patterns `shouldEqual` PatternCount 1
 
     it "a checkerboard yields exactly 2 unique patterns" do
-      PatternMap.length checkerCatalog.patterns `shouldEqual` 2
+      PatternMap.length checkerCatalog.patterns `shouldEqual` PatternCount 2
 
     it "horizontal stripes yield exactly 2 unique patterns" do
-      let cat = extractPatterns 2 false false false stripes3x3
-      PatternMap.length cat.patterns `shouldEqual` 2
+      let cat = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror false) stripes3x3
+      PatternMap.length cat.patterns `shouldEqual` PatternCount 2
 
     it "totalW equals the number of tiles extracted (frequency accounting)" do
       -- 3×3 grid, n=2, non-periodic → 4 tiles; uniform: all same → weight 4
-      let cat = extractPatterns 2 false false false uniform3x3
+      let cat = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror false) uniform3x3
       cat.totalW `shouldEqual` 4.0
 
     it "checkerboard: each pattern appears exactly twice (weight = 2)" do
@@ -365,8 +367,8 @@ main = runSpecAndExitProcess [consoleReporter] do
 
     it "periodic mode wraps the sample and finds more tiles" do
       -- 2×2 periodic checkerboard: all 4 wrapping positions give the 2 patterns
-      let cat = extractPatterns 2 true false false [[0,1],[1,0]]
-      PatternMap.length cat.patterns `shouldEqual` 2
+      let cat = extractPatterns (PatternSize 2) (InputPeriodic true) (UseRotations false) (UseMirror false) [[0,1],[1,0]]
+      PatternMap.length cat.patterns `shouldEqual` PatternCount 2
 
     -- A single 2×2 window with 4 distinct pixel values: no rotation or
     -- reflection of it ever coincides with another, so each toggle's
@@ -374,39 +376,39 @@ main = runSpecAndExitProcess [consoleReporter] do
     -- through `extractPatterns` without depending on rotate/reflect's
     -- internals being separately correct.
     it "with rotations off and mirror off, only the original window is extracted" do
-      let cat = extractPatterns 2 false false false asymGrid
-      PatternMap.length cat.patterns `shouldEqual` 1
+      let cat = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror false) asymGrid
+      PatternMap.length cat.patterns `shouldEqual` PatternCount 1
 
     it "with rotations on, all 4 rotations of an asymmetric window are extracted" do
-      let cat = extractPatterns 2 false true false asymGrid
-      PatternMap.length cat.patterns `shouldEqual` 4
+      let cat = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations true) (UseMirror false) asymGrid
+      PatternMap.length cat.patterns `shouldEqual` PatternCount 4
 
     it "with mirror on, the original and its reflection are extracted" do
-      let cat = extractPatterns 2 false false true asymGrid
-      PatternMap.length cat.patterns `shouldEqual` 2
+      let cat = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror true) asymGrid
+      PatternMap.length cat.patterns `shouldEqual` PatternCount 2
 
     it "with both rotations and mirror on, all 8 dihedral variants are extracted" do
-      let cat = extractPatterns 2 false true true asymGrid
-      PatternMap.length cat.patterns `shouldEqual` 8
+      let cat = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations true) (UseMirror true) asymGrid
+      PatternMap.length cat.patterns `shouldEqual` PatternCount 8
 
     it "with neither toggle, no pattern is marked as a rotation/mirror-only origin" do
-      let cat = extractPatterns 2 false false false asymGrid
+      let cat = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror false) asymGrid
       Map.size cat.origins `shouldEqual` 0
 
     it "with rotations on, exactly the 3 non-base rotations are marked rotated-only" do
-      let cat     = extractPatterns 2 false true false asymGrid
+      let cat     = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations true) (UseMirror false) asymGrid
           origins = Array.fromFoldable (Map.values cat.origins)
       Map.size cat.origins `shouldEqual` 3
       origins `shouldSatisfy` all (\o -> o.rotated && not o.mirrored)
 
     it "with mirror on, exactly the 1 non-base reflection is marked mirrored-only" do
-      let cat     = extractPatterns 2 false false true asymGrid
+      let cat     = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror true) asymGrid
           origins = Array.fromFoldable (Map.values cat.origins)
       Map.size cat.origins `shouldEqual` 1
       origins `shouldSatisfy` all (\o -> o.mirrored && not o.rotated)
 
     it "with both on, the 7 non-base variants split 3 rotated / 1 mirrored / 3 both" do
-      let cat        = extractPatterns 2 false true true asymGrid
+      let cat        = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations true) (UseMirror true) asymGrid
           origins    = Array.fromFoldable (Map.values cat.origins)
           rotOnly    = Array.filter (\o -> o.rotated && not o.mirrored) origins
           mirOnly    = Array.filter (\o -> o.mirrored && not o.rotated) origins
@@ -432,7 +434,7 @@ main = runSpecAndExitProcess [consoleReporter] do
       nbrs DirD `shouldEqual` [p1]
 
     it "the sole pattern in a uniform grid is compatible with itself in every direction" do
-      let cat   = extractPatterns 2 false false false uniform3x3
+      let cat   = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror false) uniform3x3
           rules = buildRules cat
           nbrs dir = Array.sort $ lookupNeighbors rules dir (PatternId 0)
       nbrs DirL `shouldEqual` [PatternId 0]
@@ -455,17 +457,17 @@ main = runSpecAndExitProcess [consoleReporter] do
       cell `shouldEqual` Just (Set.fromFoldable [p0, p1])
 
     it "the wave is not fully collapsed initially" do
-      isFullyCollapsed checker2x2Wave `shouldEqual` false
+      isFullyCollapsed checker2x2Wave `shouldEqual` FullyCollapsed false
 
     it "cell count equals width × height" do
       Map.size checker2x2Wave.cells `shouldEqual` 4
 
     it "a uniform wave (1 pattern) is considered fully collapsed from the start" do
       -- With only one possible pattern, every cell is already a singleton set.
-      let cat   = extractPatterns 2 false false false uniform3x3
+      let cat   = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror false) uniform3x3
           rules = buildRules cat
-          wave  = initWave cat rules { width: 3, height: 3 } false
-      isFullyCollapsed wave `shouldEqual` true
+          wave  = initWave cat rules { width: 3, height: 3 } (OutputPeriodic false)
+      isFullyCollapsed wave `shouldEqual` FullyCollapsed true
 
     it "resizeWave carries compat counts over correctly when the grid width changes" do
       -- Wave's `compatibility` field is `Pos`-keyed (see
@@ -476,7 +478,7 @@ main = runSpecAndExitProcess [consoleReporter] do
       -- position into the compat key itself, which needed (and easily
       -- could have gotten wrong) explicit re-encoding on every resize.
       -- Propagate first so compat counts are non-initial values.
-      let wave0 = initWave checkerCatalog checkerRules { width: 2, height: 2 } false
+      let wave0 = initWave checkerCatalog checkerRules { width: 2, height: 2 } (OutputPeriodic false)
       case propagate wave0 [ Tuple (pos 0 0) p1 ] of
         Left _ -> fail "unexpected contradiction setting up the resize fixture"
         Right wave1 -> do
@@ -503,12 +505,12 @@ main = runSpecAndExitProcess [consoleReporter] do
 
     it "a singleton possibility set has entropy 0 — no uncertainty" do
       -- H = ln(w) - (w*ln(w))/w = 0 regardless of weight
-      cellEntropy checker2x2Wave (Set.singleton p0) `shouldEqual` 0.0
+      cellEntropy checker2x2Wave (Set.singleton p0) `shouldEqual` Entropy 0.0
 
     it "two equal-weight patterns give entropy ln 2 ≈ 0.693" do
       -- H = ln(2w) - (2 * w*ln(w)) / (2w) = ln(2w) - ln(w) = ln(2)
       let bothPids = Set.fromFoldable [p0, p1]
-      cellEntropy checker2x2Wave bothPids `shouldEqual` log 2.0
+      cellEntropy checker2x2Wave bothPids `shouldEqual` Entropy (log 2.0)
 
     it "cellsWithEntropy skips collapsed (singleton) and contradiction (Nothing) cells" do
       -- checker2x2Wave has all cells with 2 options → 4 cells reported
@@ -516,9 +518,9 @@ main = runSpecAndExitProcess [consoleReporter] do
 
     it "minEntropyPos returns Nothing when all cells are already collapsed" do
       -- uniform wave has every cell as a 1-element set → no entropy to minimise
-      let cat   = extractPatterns 2 false false false uniform3x3
+      let cat   = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror false) uniform3x3
           rules = buildRules cat
-          wave  = initWave cat rules { width: 3, height: 3 } false
+          wave  = initWave cat rules { width: 3, height: 3 } (OutputPeriodic false)
       mPos <- liftEffect $ minEntropyPos wave
       mPos `shouldEqual` Nothing
 
@@ -564,9 +566,9 @@ main = runSpecAndExitProcess [consoleReporter] do
 
     it "banning the only tile causes a Contradiction" do
       -- One-pattern catalog → ban that pattern → the cell has no options left.
-      let cat   = extractPatterns 2 false false false uniform3x3
+      let cat   = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror false) uniform3x3
           rules = buildRules cat
-          wave  = initWave cat rules { width: 2, height: 2 } false
+          wave  = initWave cat rules { width: 2, height: 2 } (OutputPeriodic false)
       isLeft (propagate wave [Tuple (pos 0 0) (PatternId 0)]) `shouldEqual` true
 
     it "constraint propagation fully determines a 2×2 checkerboard wave from one ban" do
@@ -598,26 +600,26 @@ main = runSpecAndExitProcess [consoleReporter] do
   -- =========================================================================
 
     it "a uniform wave (already collapsed) returns Right immediately" do
-      let cat   = extractPatterns 2 false false false uniform3x3
+      let cat   = extractPatterns (PatternSize 2) (InputPeriodic false) (UseRotations false) (UseMirror false) uniform3x3
           rules = buildRules cat
-          wave  = initWave cat rules { width: 3, height: 3 } false
+          wave  = initWave cat rules { width: 3, height: 3 } (OutputPeriodic false)
       result <- liftEffect $ wfc wave
       case result of
         Left  _  -> fail "contradiction in a trivially collapsed uniform wave"
-        Right w' -> isFullyCollapsed w' `shouldEqual` true
+        Right w' -> isFullyCollapsed w' `shouldEqual` FullyCollapsed true
 
     it "a 2×2 checkerboard wave always collapses fully (no contradictions possible)" do
       -- The 2×2 grid is so constrained that any first collapse fully determines all cells.
       result <- liftEffect $ wfc checker2x2Wave
       case result of
         Left  _  -> fail "unexpected contradiction in 2×2 checkerboard"
-        Right w' -> isFullyCollapsed w' `shouldEqual` true
+        Right w' -> isFullyCollapsed w' `shouldEqual` FullyCollapsed true
 
     it "wfcWithRetry returns Just a fully-collapsed wave" do
-      mWave <- liftEffect $ wfcWithRetry 10 checker2x2Wave
+      mWave <- liftEffect $ wfcWithRetry (MaxAttempts 10) checker2x2Wave
       case mWave of
         Nothing -> fail "wfcWithRetry failed 10 times on a 2×2 checkerboard"
-        Just w' -> isFullyCollapsed w' `shouldEqual` true
+        Just w' -> isFullyCollapsed w' `shouldEqual` FullyCollapsed true
 
   -- =========================================================================
   describe "Stage 8 · render — extract a pixel grid from the collapsed wave" do
@@ -688,13 +690,13 @@ main = runSpecAndExitProcess [consoleReporter] do
         Failed _      -> fail "expected BackedOut, not Failed"
 
     it "solves a trivial 2×2 checkerboard, same as plain wfc" do
-      result <- liftEffect $ solveWithBacktracking 100 checker2x2Wave
+      result <- liftEffect $ solveWithBacktracking (MaxAttempts 100) checker2x2Wave
       case result of
         Left  _  -> fail "unexpected contradiction in 2×2 checkerboard"
-        Right w' -> isFullyCollapsed w' `shouldEqual` true
+        Right w' -> isFullyCollapsed w' `shouldEqual` FullyCollapsed true
 
     it "maxAttempts = 0 fails immediately without collapsing anything" do
-      result <- liftEffect $ solveWithBacktracking 0 checker2x2Wave
+      result <- liftEffect $ solveWithBacktracking (MaxAttempts 0) checker2x2Wave
       isLeft result `shouldEqual` true
 
     it "reliably solves a maze that plain single-shot wfc usually can't" do
@@ -717,9 +719,9 @@ main = runSpecAndExitProcess [consoleReporter] do
             , [1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]
             , [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
             ]
-          cat   = extractPatterns 3 false false false grid
+          cat   = extractPatterns (PatternSize 3) (InputPeriodic false) (UseRotations false) (UseMirror false) grid
           rules = buildRules cat
-          wave  = initWave cat rules { width: 22, height: 22 } false
+          wave  = initWave cat rules { width: 22, height: 22 } (OutputPeriodic false)
 
           cellPidAt w x y = do
             s <- getCellPossibilities w (Pos { x, y })
@@ -728,11 +730,11 @@ main = runSpecAndExitProcess [consoleReporter] do
               else Nothing
           patternOf pid = fromMaybe (Pattern []) (PatternMap.index cat.patterns pid)
 
-      result <- liftEffect $ solveWithBacktracking 5000 wave
+      result <- liftEffect $ solveWithBacktracking (MaxAttempts 5000) wave
       case result of
         Left  _  -> fail "backtracking failed to solve a maze it should reliably handle"
         Right w' -> do
-          isFullyCollapsed w' `shouldEqual` true
+          isFullyCollapsed w' `shouldEqual` FullyCollapsed true
           -- Structural correctness, not just "no cell ended up empty": every
           -- adjacent pair of collapsed cells must genuinely satisfy the
           -- overlap-agreement rule (same check used to validate the engine
@@ -745,7 +747,7 @@ main = runSpecAndExitProcess [consoleReporter] do
                     ny = y + oy
                 case Tuple (cellPidAt w' x y) (cellPidAt w' nx ny) of
                   Tuple (Just pidA) (Just pidB) ->
-                    if agrees 3 dir (patternOf pidA) (patternOf pidB)
+                    if (case agrees (PatternSize 3) dir (patternOf pidA) (patternOf pidB) of Agrees b -> b)
                       then []
                       else [ Tuple (Tuple x y) (Tuple nx ny) ]
                   _ -> []
@@ -759,7 +761,7 @@ main = runSpecAndExitProcess [consoleReporter] do
   -- overlap), everything downstream is identical.
 
     it "one PatternId per tile, size 1 (a tile is a single value, not an NxN block)" do
-      PatternMap.length tileCatalog.patterns `shouldEqual` 4
+      PatternMap.length tileCatalog.patterns `shouldEqual` PatternCount 4
       tileCatalog.size `shouldEqual` 1
 
     it "weights come directly from the tile def, not an occurrence count" do
@@ -781,7 +783,7 @@ main = runSpecAndExitProcess [consoleReporter] do
       cornerInBlankRight `shouldEqual` blankInCornerLeft
 
     it "solves a periodic tiled wave into a socket-consistent result" do
-      let wave = initWave tileCatalog tileRules { width: 10, height: 10 } true
+      let wave = initWave tileCatalog tileRules { width: 10, height: 10 } (OutputPeriodic true)
 
           cellPidAt w x y = do
             s <- getCellPossibilities w (Pos { x, y })
@@ -790,11 +792,11 @@ main = runSpecAndExitProcess [consoleReporter] do
               else Nothing
           tileOf (PatternId i) = fromMaybe tileBlank (Array.index tileSet i)
 
-      result <- liftEffect $ solveWithBacktracking 2000 wave
+      result <- liftEffect $ solveWithBacktracking (MaxAttempts 2000) wave
       case result of
         Left  _  -> fail "backtracking failed to solve a small tiled wave"
         Right w' -> do
-          isFullyCollapsed w' `shouldEqual` true
+          isFullyCollapsed w' `shouldEqual` FullyCollapsed true
           let violations = do
                 y <- Array.range 0 9
                 x <- Array.range 0 9
@@ -803,7 +805,7 @@ main = runSpecAndExitProcess [consoleReporter] do
                     ny = (y + oy) `mod` 10
                 case Tuple (cellPidAt w' x y) (cellPidAt w' nx ny) of
                   Tuple (Just pidA) (Just pidB) ->
-                    if sidesMatch dir (tileOf pidA) (tileOf pidB)
+                    if (case sidesMatch dir (tileOf pidA) (tileOf pidB) of SidesMatch b -> b)
                       then []
                       else [ Tuple (Tuple x y) (Tuple nx ny) ]
                   _ -> []
@@ -821,34 +823,34 @@ main = runSpecAndExitProcess [consoleReporter] do
     describe "WFC.TileSet.Symmetry — per-class rotation cardinality" do
 
       it "cardinality matches each symmetry class' distinct-orientation count" do
-        cardinality SymX `shouldEqual` 1
-        cardinality SymI `shouldEqual` 2
-        cardinality SymDiag `shouldEqual` 2
-        cardinality SymL `shouldEqual` 4
-        cardinality SymT `shouldEqual` 4
-        cardinality SymF `shouldEqual` 8
+        cardinality SymX `shouldEqual` OrientationCount 1
+        cardinality SymI `shouldEqual` OrientationCount 2
+        cardinality SymDiag `shouldEqual` OrientationCount 2
+        cardinality SymL `shouldEqual` OrientationCount 4
+        cardinality SymT `shouldEqual` OrientationCount 4
+        cardinality SymF `shouldEqual` OrientationCount 8
 
       it "distinctOrientations is exactly 0..cardinality-1" do
-        distinctOrientations SymX `shouldEqual` [ 0 ]
-        distinctOrientations SymI `shouldEqual` [ 0, 1 ]
-        distinctOrientations SymL `shouldEqual` [ 0, 1, 2, 3 ]
-        distinctOrientations SymF `shouldEqual` [ 0, 1, 2, 3, 4, 5, 6, 7 ]
+        distinctOrientations SymX `shouldEqual` [ OrientationIndex 0 ]
+        distinctOrientations SymI `shouldEqual` map OrientationIndex [ 0, 1 ]
+        distinctOrientations SymL `shouldEqual` map OrientationIndex [ 0, 1, 2, 3 ]
+        distinctOrientations SymF `shouldEqual` map OrientationIndex [ 0, 1, 2, 3, 4, 5, 6, 7 ]
 
       it "rotating 4 times returns to the start, for every symmetry class" do
         let allSyms = [ SymX, SymI, SymDiag, SymL, SymT, SymF ]
         for_ allSyms \sym ->
           for_ (distinctOrientations sym) \i ->
-            rotateIndexBy sym 4 i `shouldEqual` i
+            rotateIndexBy sym (RotationSteps 4) i `shouldEqual` i
 
       it "SymI/SymDiag rotation is order-2 (180° rotation is a no-op)" do
-        rotateIndex SymI 0 `shouldEqual` 1
-        rotateIndex SymI 1 `shouldEqual` 0
-        rotateIndexBy SymI 2 0 `shouldEqual` 0
-        rotateIndexBy SymDiag 2 1 `shouldEqual` 1
+        rotateIndex SymI (OrientationIndex 0) `shouldEqual` OrientationIndex 1
+        rotateIndex SymI (OrientationIndex 1) `shouldEqual` OrientationIndex 0
+        rotateIndexBy SymI (RotationSteps 2) (OrientationIndex 0) `shouldEqual` OrientationIndex 0
+        rotateIndexBy SymDiag (RotationSteps 2) (OrientationIndex 1) `shouldEqual` OrientationIndex 1
 
       it "SymL/SymT rotation is a plain 4-cycle" do
-        map (rotateIndex SymL) [ 0, 1, 2, 3 ] `shouldEqual` [ 1, 2, 3, 0 ]
-        map (rotateIndex SymT) [ 0, 1, 2, 3 ] `shouldEqual` [ 1, 2, 3, 0 ]
+        map (rotateIndex SymL) (map OrientationIndex [ 0, 1, 2, 3 ]) `shouldEqual` map OrientationIndex [ 1, 2, 3, 0 ]
+        map (rotateIndex SymT) (map OrientationIndex [ 0, 1, 2, 3 ]) `shouldEqual` map OrientationIndex [ 1, 2, 3, 0 ]
 
       it "parseSymmetry accepts all 6 class codes and rejects unknown ones" do
         parseSymmetry "X" `shouldEqual` Right SymX
@@ -900,8 +902,8 @@ main = runSpecAndExitProcess [consoleReporter] do
         -- plain rotation sweep alone would already reach) — this richer,
         -- per-direction coverage is the exact gap that caused Circuit's
         -- roads to break.
-        let symOf "track" = SymI
-            symOf _         = SymL
+        let symOf (TileName "track") = SymI
+            symOf _                    = SymL
             rule = { leftName: "track", leftRot: 0, rightName: "turn", rightRot: 0 }
             facts = TS.expandRule symOf rule
             atDirL = Array.filter (\f -> f.dir == DirL) facts
@@ -951,7 +953,7 @@ main = runSpecAndExitProcess [consoleReporter] do
         tileName (TS.TileInstance t) = t.name
 
       it "catalog has one PatternId per (tile, distinct orientation)" do
-        PatternMap.length built.catalog.patterns `shouldEqual` 5 -- 1 (blank, X) + 4 (corner, L)
+        PatternMap.length built.catalog.patterns `shouldEqual` PatternCount 5 -- 1 (blank, X) + 4 (corner, L)
         built.catalog.size `shouldEqual` 1
 
       it "every orientation of a tile keeps that tile's own declared weight" do
@@ -999,16 +1001,16 @@ main = runSpecAndExitProcess [consoleReporter] do
     describe "WFC.TileSet.Xml — parsing the real Knots.xml tileset" do
 
       it "parses all 5 tiles with their declared symmetry" do
-        case parseTileSetXml knotsXml of
-          Left err -> fail ("failed to parse knotsXml: " <> err)
+        case parseTileSetXml (XmlSource knotsXml) of
+          Left (XmlParseError err) -> fail ("failed to parse knotsXml: " <> err)
           Right def -> do
             Array.length def.tiles `shouldEqual` 5
             map _.symmetry (Array.sortWith _.name def.tiles)
               `shouldEqual` [ SymL, SymI, SymX, SymI, SymT ] -- corner, cross, empty, line, t
 
       it "parses all 35 neighbor rules and 10 subsets" do
-        case parseTileSetXml knotsXml of
-          Left err -> fail ("failed to parse knotsXml: " <> err)
+        case parseTileSetXml (XmlSource knotsXml) of
+          Left (XmlParseError err) -> fail ("failed to parse knotsXml: " <> err)
           Right def -> do
             Array.length def.neighbors `shouldEqual` 35
             Array.length def.subsets `shouldEqual` 10
@@ -1019,8 +1021,8 @@ main = runSpecAndExitProcess [consoleReporter] do
         -- orientation 0; line (SymI) rotates 0/1 every 90°, alternating
         -- back every 180° — so the DirR fact is (empty@0, line@1), and its
         -- 90°-rotation (DirD) uses `rotateIndexBy SymI 1 1 = 0`.
-        case parseTileSetXml knotsXml of
-          Left err -> fail ("failed to parse knotsXml: " <> err)
+        case parseTileSetXml (XmlSource knotsXml) of
+          Left (XmlParseError err) -> fail ("failed to parse knotsXml: " <> err)
           Right def -> do
             let built = TS.buildTileSet def
                 emptyPid = Map.lookup (TS.TileInstance { name: "empty", orientation: 0 }) built.index
@@ -1038,15 +1040,15 @@ main = runSpecAndExitProcess [consoleReporter] do
               _ -> fail "expected empty@0, line@0 and line@1 to all be in the built index"
 
       it "solves a Knots wave built end-to-end from the parsed XML" do
-        case parseTileSetXml knotsXml of
-          Left err -> fail ("failed to parse knotsXml: " <> err)
+        case parseTileSetXml (XmlSource knotsXml) of
+          Left (XmlParseError err) -> fail ("failed to parse knotsXml: " <> err)
           Right def -> do
             let built = TS.buildTileSet def
-                wave = initWave built.catalog built.rules { width: 6, height: 6 } true
-            result <- liftEffect $ solveWithBacktracking 2000 wave
+                wave = initWave built.catalog built.rules { width: 6, height: 6 } (OutputPeriodic true)
+            result <- liftEffect $ solveWithBacktracking (MaxAttempts 2000) wave
             case result of
               Left _ -> fail "backtracking failed to solve a small Knots wave"
-              Right w' -> isFullyCollapsed w' `shouldEqual` true
+              Right w' -> isFullyCollapsed w' `shouldEqual` FullyCollapsed true
 
   -- =========================================================================
   describe "Stage 12 · WFC.Propagate.applyGround — original-WFC 'ground' heuristic" do
@@ -1058,7 +1060,7 @@ main = runSpecAndExitProcess [consoleReporter] do
   -- groundSkyCatalog`) stands in for the original C# WFC's `T-1`.
 
     it "pins the ground pattern onto the bottom row and bans it from every other row" do
-      let wave0 = initWave groundSkyCatalog groundSkyRules { width: 2, height: 3 } false
+      let wave0 = initWave groundSkyCatalog groundSkyRules { width: 2, height: 3 } (OutputPeriodic false)
       lastPatternId groundSkyCatalog `shouldEqual` Just pGround
       case applyGround pGround wave0 of
         Left _   -> fail "unexpected contradiction grounding a ground/sky wave"
@@ -1071,7 +1073,7 @@ main = runSpecAndExitProcess [consoleReporter] do
               Just pids -> Set.member pGround pids `shouldEqual` false
 
     it "height 1: the single row is entirely the bottom row (no other rows to ban from)" do
-      let wave0 = initWave groundSkyCatalog groundSkyRules { width: 2, height: 1 } false
+      let wave0 = initWave groundSkyCatalog groundSkyRules { width: 2, height: 1 } (OutputPeriodic false)
       case applyGround pGround wave0 of
         Left _   -> fail "unexpected contradiction grounding a 1-row wave"
         Right w' -> do

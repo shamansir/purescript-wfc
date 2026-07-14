@@ -17,13 +17,19 @@ allDirections :: Array Direction
 allDirections = [ DirL, DirD, DirR, DirU ]
 
 -- Dense 0..3 ordinal matching `allDirections`'s order — used to fold a
--- Direction into a combined integer index (see WFC.Wave.compatKey) instead
--- of comparing/hashing the constructor itself.
-dirIndex :: Direction -> Int
-dirIndex DirL = 0
-dirIndex DirD = 1
-dirIndex DirR = 2
-dirIndex DirU = 3
+-- Direction into a combined integer index (see WFC.Wave.compatibilityKey)
+-- instead of comparing/hashing the constructor itself.
+newtype DirectionIndex = DirectionIndex Int
+
+derive newtype instance eqDirectionIndex :: Eq DirectionIndex
+derive newtype instance showDirectionIndex :: Show DirectionIndex
+derive newtype instance ordDirectionIndex :: Ord DirectionIndex
+
+dirIndex :: Direction -> DirectionIndex
+dirIndex DirL = DirectionIndex 0
+dirIndex DirD = DirectionIndex 1
+dirIndex DirR = DirectionIndex 2
+dirIndex DirU = DirectionIndex 3
 
 dirOffset :: Direction -> { dx :: Int, dy :: Int }
 dirOffset DirL = { dx: -1, dy:  0 }

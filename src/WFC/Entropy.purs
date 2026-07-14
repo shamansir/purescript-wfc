@@ -13,7 +13,7 @@ import Effect (Effect)
 import Effect.Random (random)
 import WFC.Grid (Pos)
 import WFC.Pattern (PatternId)
-import WFC.Wave (Wave, entropyFromStats, statsForSet)
+import WFC.Wave (Entropy(..), Wave, entropyFromStats, statsForSet)
 
 -- Shannon entropy of an arbitrary possibility set, given the catalog's
 -- weight table — H = ln(Σw) - (Σ w*ln(w)) / Σw, summed from `possible`
@@ -21,7 +21,7 @@ import WFC.Wave (Wave, entropyFromStats, statsForSet)
 -- hypothetical/explicit set; `cellsWithEntropy` below uses the wave's
 -- incrementally-maintained cache instead, since it always wants a cell's
 -- *actual current* possibilities).
-cellEntropy :: forall a. Wave a -> Set.Set PatternId -> Number
+cellEntropy :: forall a. Wave a -> Set.Set PatternId -> Entropy
 cellEntropy wave possible = entropyFromStats (statsForSet wave.catalog possible)
 
 -- All non-collapsed, non-contradiction cells with their entropy. Reads each
@@ -29,7 +29,7 @@ cellEntropy wave possible = entropyFromStats (statsForSet wave.catalog possible)
 -- WFC.Propagate.processBan) instead of re-summing that cell's whole
 -- possibility set here — this is what makes calling `minEntropyPos` once
 -- per solving step cheap regardless of how many patterns remain possible.
-cellsWithEntropy :: forall a. Wave a -> Array (Tuple Pos Number)
+cellsWithEntropy :: forall a. Wave a -> Array (Tuple Pos Entropy)
 cellsWithEntropy wave =
   Array.mapMaybe go (Map.toUnfoldable wave.cells :: Array (Tuple Pos _))
   where
@@ -58,7 +58,7 @@ minEntropyPos wave = do
       noisied <- traverse addNoise candidates
       pure $ map (\(Tuple pos _) -> pos) (minimumBy cmpSnd noisied)
   where
-    addNoise (Tuple pos e) = do
+    addNoise (Tuple pos (Entropy e)) = do
       noise <- random
-      pure (Tuple pos (e + noise * 1.0e-6))
+      pure (Tuple pos (Entropy (e + noise * 1.0e-6)))
     cmpSnd (Tuple _ a) (Tuple _ b) = compare a b

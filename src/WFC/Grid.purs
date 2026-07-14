@@ -22,9 +22,20 @@ allPositions { width, height } = do
   x <- Array.range 0 (width - 1)
   pure (Pos { x, y })
 
+-- Whether the *output* wave wraps at its edges during solving — distinct
+-- from `WFC.Catalog`'s `InputPeriodic` (whether the *source sample* wraps
+-- when extracting N×N windows): the two flags govern different phases and
+-- mixing them up is a real bug, not just a naming slip (the demo's
+-- "ground" heuristic once relied on getting exactly this distinction
+-- right — see docs/ for the Flowers/MoreFlowers ground-row fix).
+newtype OutputPeriodic = OutputPeriodic Boolean
+
+derive newtype instance eqOutputPeriodic :: Eq OutputPeriodic
+derive newtype instance showOutputPeriodic :: Show OutputPeriodic
+
 -- Neighbour of pos in direction dir; Nothing when out-of-bounds (non-periodic)
-neighborPos :: GridSize -> Boolean -> Pos -> Direction -> Maybe Pos
-neighborPos { width, height } periodic (Pos { x, y }) dir =
+neighborPos :: GridSize -> OutputPeriodic -> Pos -> Direction -> Maybe Pos
+neighborPos { width, height } (OutputPeriodic periodic) (Pos { x, y }) dir =
   let { dx, dy } = dirOffset dir
       nx = x + dx
       ny = y + dy
@@ -34,10 +45,13 @@ neighborPos { width, height } periodic (Pos { x, y }) dir =
               then Just (Pos { x: nx, y: ny })
               else Nothing
 
-gridWidth :: forall a. Array (Array a) -> Int
-gridWidth grid = case Array.head grid of
-  Nothing  -> 0
-  Just row -> Array.length row
+newtype GridWidth = GridWidth Int
+newtype GridHeight = GridHeight Int
 
-gridHeight :: forall a. Array (Array a) -> Int
-gridHeight = Array.length
+gridWidth :: forall a. Array (Array a) -> GridWidth
+gridWidth grid = GridWidth (case Array.head grid of
+  Nothing  -> 0
+  Just row -> Array.length row)
+
+gridHeight :: forall a. Array (Array a) -> GridHeight
+gridHeight = GridHeight <<< Array.length

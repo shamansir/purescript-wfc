@@ -16,7 +16,7 @@ import WFC.Collapse (weightedSample)
 import WFC.Entropy (minEntropyPos)
 import WFC.Grid (Pos)
 import WFC.Pattern (PatternId)
-import WFC.Propagate (BanEvent, Contradiction(..), propagate)
+import WFC.Propagate (BanEvent, Contradiction(..), MaxAttempts(..), propagate)
 import WFC.Wave (Wave, getCellPossibilities)
 
 -- One decision point in the search: the wave as it was *before* this cell
@@ -127,8 +127,8 @@ stepSearch st =
 -- across the whole search (not full restarts, unlike `wfcWithRetry`'s
 -- budget of the same name) — a safety valve against a pathological or
 -- genuinely-unsatisfiable ruleset searching forever.
-solveWithBacktracking :: forall a. Int -> Wave a -> Effect (Either Contradiction (Wave a))
-solveWithBacktracking maxAttempts wave0 = do
+solveWithBacktracking :: forall a. MaxAttempts -> Wave a -> Effect (Either Contradiction (Wave a))
+solveWithBacktracking (MaxAttempts maxAttempts) wave0 = do
   first <- initSearch wave0
   tailRecM go first
   where

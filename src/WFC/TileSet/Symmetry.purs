@@ -1,5 +1,8 @@
 module WFC.TileSet.Symmetry
   ( Symmetry(..)
+  , OrientationIndex(..)
+  , OrientationCount(..)
+  , RotationSteps(..)
   , parseSymmetry
   , cardinality
   , distinctOrientations
@@ -12,6 +15,27 @@ import Prelude
 
 import Data.Array as Array
 import Data.Either (Either(..))
+
+-- One of a tile's own `0 .. cardinality - 1` distinct-orientation indices
+-- (see `cardinality`/`distinctOrientations`) — kept distinct from
+-- `OrientationCount` (how many such indices exist for a class) and
+-- `RotationSteps` (how many 90° grid-rotation steps to apply), even though
+-- all three are "just an Int".
+newtype OrientationIndex = OrientationIndex Int
+
+derive newtype instance eqOrientationIndex :: Eq OrientationIndex
+derive newtype instance ordOrientationIndex :: Ord OrientationIndex
+derive newtype instance showOrientationIndex :: Show OrientationIndex
+
+newtype OrientationCount = OrientationCount Int
+
+derive newtype instance eqOrientationCount :: Eq OrientationCount
+derive newtype instance showOrientationCount :: Show OrientationCount
+
+-- How many 90° clockwise grid-rotation steps to apply — see `rotateIndexBy`.
+-- Distinct from `OrientationIndex`: this counts *applications* of
+-- `rotateIndex`, not a tile's own orientation slot.
+newtype RotationSteps = RotationSteps Int
 
 -- The original Wave Function Collapse algorithm's tile symmetry classes:
 -- how many of a tile's 4 rotations (or, for `F`, 4 rotations × mirrored)
@@ -53,21 +77,23 @@ parseSymmetry other = Left ("unknown tile symmetry: " <> show other)
 -- variants; the tileset XML format's `<neighbor>` rules only ever declare
 -- a rotation, never a mirror, so reflection plays no part in adjacency
 -- expansion and isn't needed here.)
-cardinality :: Symmetry -> Int
-cardinality SymX = 1
-cardinality SymI = 2
-cardinality SymDiag = 2
-cardinality SymL = 4
-cardinality SymT = 4
-cardinality SymF = 8
+cardinality :: Symmetry -> OrientationCount
+cardinality SymX = OrientationCount 1
+cardinality SymI = OrientationCount 2
+cardinality SymDiag = OrientationCount 2
+cardinality SymL = OrientationCount 4
+cardinality SymT = OrientationCount 4
+cardinality SymF = OrientationCount 8
 
 -- A tile's own distinct-orientation indices, `0 .. cardinality - 1` — this
 -- is exactly the index space the tileset XML's `"name N"` neighbor
 -- references live in (a sample author only ever writes `N` up to that
 -- tile's own cardinality, e.g. an `I`-symmetric tile only ever appears as
 -- "name" or "name 1", never "name 2"/"name 3").
-distinctOrientations :: Symmetry -> Array Int
-distinctOrientations sym = Array.range 0 (cardinality sym - 1)
+distinctOrientations :: Symmetry -> Array OrientationIndex
+distinctOrientations sym =
+  let OrientationCount n = cardinality sym
+  in map OrientationIndex (Array.range 0 (n - 1))
 
 -- Rotate one of a tile's own distinct-orientation indices by 90° clockwise,
 -- landing on another (or the same) index within `0 .. cardinality - 1`.
@@ -81,18 +107,18 @@ distinctOrientations sym = Array.range 0 (cardinality sym - 1)
 -- below (`rotate >>> reflect == reflect >>> rotate⁻¹`, the standard
 -- dihedral-group relation) — reproduced from `SimpleTiledModel.cs`'s own
 -- `a = i => i < 4 ? (i + 1) % 4 : 4 + (i - 1) % 4`.
-rotateIndex :: Symmetry -> Int -> Int
-rotateIndex SymX _ = 0
-rotateIndex SymI i = 1 - i
-rotateIndex SymDiag i = 1 - i
-rotateIndex SymL i = (i + 1) `mod` 4
-rotateIndex SymT i = (i + 1) `mod` 4
-rotateIndex SymF i = if i < 4 then (i + 1) `mod` 4 else 4 + ((i - 1) `mod` 4)
+rotateIndex :: Symmetry -> OrientationIndex -> OrientationIndex
+rotateIndex SymX _ = OrientationIndex 0
+rotateIndex SymI (OrientationIndex i) = OrientationIndex (1 - i)
+rotateIndex SymDiag (OrientationIndex i) = OrientationIndex (1 - i)
+rotateIndex SymL (OrientationIndex i) = OrientationIndex ((i + 1) `mod` 4)
+rotateIndex SymT (OrientationIndex i) = OrientationIndex ((i + 1) `mod` 4)
+rotateIndex SymF (OrientationIndex i) = OrientationIndex (if i < 4 then (i + 1) `mod` 4 else 4 + ((i - 1) `mod` 4))
 
 -- Rotate by N 90° steps (N taken mod 4, since a full grid rotation cycle
 -- is always 4 steps regardless of a tile's own cardinality).
-rotateIndexBy :: Symmetry -> Int -> Int -> Int
-rotateIndexBy sym n i0 = Array.foldl (\i _ -> rotateIndex sym i) i0 (Array.replicate (n `mod` 4) unit)
+rotateIndexBy :: Symmetry -> RotationSteps -> OrientationIndex -> OrientationIndex
+rotateIndexBy sym (RotationSteps n) i0 = Array.foldl (\i _ -> rotateIndex sym i) i0 (Array.replicate (n `mod` 4) unit)
 
 -- Reflect one of a tile's own distinct-orientation indices across a
 -- vertical axis (a horizontal flip), landing on another (or the same)
@@ -106,10 +132,10 @@ rotateIndexBy sym n i0 = Array.foldl (\i _ -> rotateIndex sym i) i0 (Array.repli
 -- `<neighbor>` rule across reflection as well as rotation, matching
 -- `SimpleTiledModel.cs`'s `densePropagator` construction (which uses this
 -- same `b` table via `action[t][4..7]`).
-reflectIndex :: Symmetry -> Int -> Int
-reflectIndex SymX _ = 0
-reflectIndex SymI i = i
-reflectIndex SymDiag i = 1 - i
-reflectIndex SymL i = if i `mod` 2 == 0 then i + 1 else i - 1
-reflectIndex SymT i = if i `mod` 2 == 0 then i else 4 - i
-reflectIndex SymF i = if i < 4 then i + 4 else i - 4
+reflectIndex :: Symmetry -> OrientationIndex -> OrientationIndex
+reflectIndex SymX _ = OrientationIndex 0
+reflectIndex SymI (OrientationIndex i) = OrientationIndex i
+reflectIndex SymDiag (OrientationIndex i) = OrientationIndex (1 - i)
+reflectIndex SymL (OrientationIndex i) = OrientationIndex (if i `mod` 2 == 0 then i + 1 else i - 1)
+reflectIndex SymT (OrientationIndex i) = OrientationIndex (if i `mod` 2 == 0 then i else 4 - i)
+reflectIndex SymF (OrientationIndex i) = OrientationIndex (if i < 4 then i + 4 else i - 4)

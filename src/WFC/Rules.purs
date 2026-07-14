@@ -8,9 +8,10 @@ import Data.Map as Map
 import Data.Maybe (fromMaybe)
 import Data.Tuple (Tuple(..))
 import WFC.Catalog (PatternCatalog, patternIds, patternOf)
-import WFC.Direction (Direction, allDirections, dirIndex)
-import WFC.Pattern (PatternId(..), Pattern(..), agrees)
-import WFC.PatternMap (PatternMap)
+import WFC.CompatibilityMap (CompatibilityCount(..))
+import WFC.Direction (Direction, DirectionIndex(..), allDirections, dirIndex)
+import WFC.Pattern (Agrees(..), PatternId(..), PatternSize(..), Pattern(..), agrees)
+import WFC.PatternMap (PatternCount(..), PatternMap)
 import WFC.PatternMap as PatternMap
 
 -- propagator[dir][pid] = Array of pattern IDs that can be placed adjacent
@@ -32,8 +33,8 @@ newtype AdjacencyRules = AdjacencyRules (Array (PatternMap (Array PatternId)))
 -- `AdjacencyRules` actually used at solve time. `patternCount` sizes each
 -- direction's dense `PatternMap` row (patterns with no rule at all get an
 -- empty compat list, same as a missing `Map` entry would give).
-fromNestedMap :: Int -> Map Direction (Map PatternId (Array PatternId)) -> AdjacencyRules
-fromNestedMap patternCount byDir =
+fromNestedMap :: PatternCount -> Map Direction (Map PatternId (Array PatternId)) -> AdjacencyRules
+fromNestedMap (PatternCount patternCount) byDir =
   AdjacencyRules $ map
     (\dir ->
       let byPid = fromMaybe Map.empty (Map.lookup dir byDir)
@@ -45,26 +46,30 @@ fromNestedMap patternCount byDir =
 -- Look up what patterns can exist in direction dir from pattern pid.
 lookupNeighbors :: AdjacencyRules -> Direction -> PatternId -> Array PatternId
 lookupNeighbors (AdjacencyRules rules) dir pid =
-  fromMaybe [] (Array.index rules (dirIndex dir) >>= \byPid -> PatternMap.index byPid pid)
+  let DirectionIndex di = dirIndex dir
+  in fromMaybe [] (Array.index rules di >>= \byPid -> PatternMap.index byPid pid)
 
 -- Build adjacency rules from the pattern catalog.
 -- Two patterns are compatible in direction d if their overlap regions agree.
 buildRules :: forall a. Eq a => PatternCatalog a -> AdjacencyRules
 buildRules catalog =
   let ids = patternIds catalog
+      n = PatternSize catalog.size
       getPat pid = fromMaybe (Pattern []) (patternOf catalog pid)
+      compatible dir pat pid2 = case agrees n dir pat (getPat pid2) of
+        Agrees b -> b
       forDir dir =
         Map.fromFoldable $ map (\pid ->
           let pat     = getPat pid
-              compat  = Array.filter (\pid2 -> agrees catalog.size dir pat (getPat pid2)) ids
+              compat  = Array.filter (compatible dir pat) ids
           in Tuple pid compat
         ) ids
       byDir = Map.fromFoldable $ map (\dir -> Tuple dir (forDir dir)) allDirections
-  in fromNestedMap (Array.length ids) byDir
+  in fromNestedMap (PatternCount (Array.length ids)) byDir
 
 -- Initial compatibility count for (pid, dir) at any position:
 -- how many tiles in the neighbor in direction dir can support pid.
 -- = |propagator[dir][pid]| — the set of patterns pid allows as its
 -- direction-dir neighbour, before any of them have been ruled out.
-initialCompatCount :: AdjacencyRules -> PatternId -> Direction -> Int
-initialCompatCount rules pid dir = Array.length (lookupNeighbors rules dir pid)
+initialCompatCount :: AdjacencyRules -> PatternId -> Direction -> CompatibilityCount
+initialCompatCount rules pid dir = CompatibilityCount (Array.length (lookupNeighbors rules dir pid))

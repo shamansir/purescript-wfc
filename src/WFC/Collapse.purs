@@ -11,7 +11,7 @@ import Data.Set as Set
 import Data.Tuple (Tuple(..), fst)
 import Effect (Effect)
 import Effect.Random (random)
-import WFC.Catalog (weightOf)
+import WFC.Catalog (Weight(..), weightOf)
 import WFC.Grid (Pos)
 import WFC.Pattern (PatternId)
 import WFC.Propagate (BanEvent, Contradiction(..), propagate)
@@ -19,12 +19,12 @@ import WFC.Wave (Wave)
 
 -- Weighted random pick from (pid, weight) pairs.
 -- threshold should be in [0, totalWeight).
-pickWeighted :: Number -> Array (Tuple PatternId Number) -> Maybe PatternId
-pickWeighted threshold ws = go 0.0 ws
+pickWeighted :: Weight -> Array (Tuple PatternId Weight) -> Maybe PatternId
+pickWeighted (Weight threshold) ws = go 0.0 ws
   where
     go acc arr = case Array.uncons arr of
       Nothing -> map fst (Array.last ws)  -- fallback
-      Just { head: Tuple pid w, tail: rest } ->
+      Just { head: Tuple pid (Weight w), tail: rest } ->
         if acc + w >= threshold then Just pid else go (acc + w) rest
 
 -- Sample one pattern ID from the possibility set using catalog weights.
@@ -32,12 +32,12 @@ weightedSample :: forall a. Wave a -> Set.Set PatternId -> Effect (Maybe Pattern
 weightedSample wave possible = do
   let pids   = Set.toUnfoldable possible :: Array PatternId
       ws     = map (\pid -> Tuple pid (weightOf wave.catalog pid)) pids
-      totalW = foldl (\acc (Tuple _ w) -> acc + w) 0.0 ws
+      totalW = foldl (\acc (Tuple _ (Weight w)) -> acc + w) 0.0 ws
   if totalW <= 0.0
     then pure Nothing
     else do
       r <- map (_ * totalW) random
-      pure (pickWeighted r ws)
+      pure (pickWeighted (Weight r) ws)
 
 -- Collapse the cell at pos: pick one pattern, ban all others, propagate.
 collapseAt :: forall a. Wave a -> Pos -> Effect (Either Contradiction (Wave a))

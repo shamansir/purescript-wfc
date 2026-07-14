@@ -23,8 +23,9 @@ import Unsafe.Coerce (unsafeCoerce)
 import WFC.Algorithm (step)
 import WFC.Backtrack (SearchState, StepResult(..))
 import WFC.Backtrack as Backtrack
-import WFC.Catalog (PatternCatalog, extractPatterns, lastPatternId)
-import WFC.Grid (GridSize, Pos(..))
+import WFC.Catalog (InputPeriodic(..), PatternCatalog, extractPatterns, lastPatternId)
+import WFC.Grid (GridSize, OutputPeriodic(..), Pos(..))
+import WFC.Pattern (PatternSize(..), UseMirror(..), UseRotations(..))
 import WFC.Propagate (Contradiction(..), applyGround)
 import WFC.Rules (AdjacencyRules, buildRules)
 import WFC.Tiles (buildTiledCatalog, buildTiledRules)
@@ -140,7 +141,7 @@ buildFromCommand cmd =
       let sample = if cmd.sourceKind == "image"
                      then customSampleDef cmd.custom
                      else fromMaybe checkerboard (Array.index samples cmd.sampleIdx)
-          cat    = extractPatterns cmd.patternSize cmd.inputPeriodic cmd.useRotations cmd.useMirror sample.grid
+          cat    = extractPatterns (PatternSize cmd.patternSize) (InputPeriodic cmd.inputPeriodic) (UseRotations cmd.useRotations) (UseMirror cmd.useMirror) sample.grid
       in { cat, rules: buildRules cat, outW: cmd.outW, outH: cmd.outH, periodic: cmd.outputPeriodic, ground: sample.ground }
 
 -- Applies the "ground" heuristic (see WFC.Propagate.applyGround) to a
@@ -170,7 +171,7 @@ getOrInitSession sessionRef cmd = do
     Nothing -> do
       let built = buildFromCommand cmd
           wave0 = applyGroundIfNeeded built
-                     (initWave built.cat built.rules { width: built.outW, height: built.outH } built.periodic)
+                     (initWave built.cat built.rules { width: built.outW, height: built.outH } (OutputPeriodic built.periodic))
       t0 <- now
       session <-
         if cmd.useBacktracking then do

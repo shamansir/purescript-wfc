@@ -5,6 +5,9 @@ module WFC.TileSet
   , Subset
   , TileSetDef
   , RuleFact
+  , TileName(..)
+  , SubsetName(..)
+  , Unique(..)
   , rotateDirCW
   , expandRule
   , tileInstances
@@ -19,11 +22,29 @@ import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Tuple (Tuple(..))
-import WFC.Catalog (Accum, PatternCatalog, finalize)
+import WFC.Catalog (Accum, PatternCatalog, Weight(..), finalize)
 import WFC.Direction (Direction(..), opposite)
-import WFC.Pattern (Pattern(..), PatternId(..))
+import WFC.Pattern (Pattern(..), PatternId(..), PatternSize(..))
+import WFC.PatternMap (PatternCount(..))
 import WFC.Rules (AdjacencyRules, fromNestedMap)
-import WFC.TileSet.Symmetry (Symmetry(..), distinctOrientations, reflectIndex, rotateIndex, rotateIndexBy)
+import WFC.TileSet.Symmetry (OrientationIndex(..), RotationSteps(..), Symmetry(..), distinctOrientations, reflectIndex, rotateIndex, rotateIndexBy)
+
+-- A tile's own name — distinct from a bare `String` at call sites that
+-- look one up by name (`expandRule`'s `String -> Symmetry`), even though
+-- `TileDef`/`NeighborRule`/`Subset`'s own `name`/`leftName`/etc. fields
+-- stay plain `String` (already labeled, see those records).
+newtype TileName = TileName String
+
+derive newtype instance eqTileName :: Eq TileName
+derive newtype instance ordTileName :: Ord TileName
+derive newtype instance showTileName :: Show TileName
+
+-- Whether each of a tileset's rotations has its own separate source image
+-- vs. one image rotated programmatically — the parsed value of a `<set
+-- unique="...">` attribute. `TileSetDef`'s own `unique` field stays plain
+-- `Boolean` (already labeled there); this is for `WFC.TileSet.Xml.parseBool`,
+-- which builds that field's value from raw XML text.
+newtype Unique = Unique Boolean
 
 -- One specific oriented tile — a base tile name plus which of its own
 -- `cardinality`-many distinct orientations this is (see
@@ -115,7 +136,7 @@ type RuleFact =
 -- different orientation. Any tileset leaning on `L`/`T` tiles for
 -- continuity (e.g. corner/junction pieces in a road or pipe network) ends
 -- up with an incomplete rule set and visible discontinuities as a result.
-expandRule :: (String -> Symmetry) -> NeighborRule -> Array RuleFact
+expandRule :: (TileName -> Symmetry) -> NeighborRule -> Array RuleFact
 expandRule symOf rule =
   [ { dir: DirL, left: ti rule.rightName r,  right: ti rule.leftName l   }
   , { dir: DirL, left: ti rule.rightName r6, right: ti rule.leftName l6  }
@@ -127,36 +148,36 @@ expandRule symOf rule =
   , { dir: DirD, left: ti rule.leftName d2,  right: ti rule.rightName u2 }
   ]
   where
-  leftSym = symOf rule.leftName
-  rightSym = symOf rule.rightName
-  ti name orientation = TileInstance { name, orientation }
+  leftSym = symOf (TileName rule.leftName)
+  rightSym = symOf (TileName rule.rightName)
+  ti name (OrientationIndex orientation) = TileInstance { name, orientation }
 
-  l = rule.leftRot
-  r = rule.rightRot
+  l = OrientationIndex rule.leftRot
+  r = OrientationIndex rule.rightRot
   d = rotateIndex leftSym l
   u = rotateIndex rightSym r
 
-  l2 = rotateIndexBy leftSym 2 l
+  l2 = rotateIndexBy leftSym (RotationSteps 2) l
   l4 = reflectIndex leftSym l
   l6 = reflectIndex leftSym l2
 
-  r2 = rotateIndexBy rightSym 2 r
+  r2 = rotateIndexBy rightSym (RotationSteps 2) r
   r4 = reflectIndex rightSym r
   r6 = reflectIndex rightSym r2
 
-  d2 = rotateIndexBy leftSym 2 d
+  d2 = rotateIndexBy leftSym (RotationSteps 2) d
   d4 = reflectIndex leftSym d
   d6 = reflectIndex leftSym d2
 
-  u2 = rotateIndexBy rightSym 2 u
+  u2 = rotateIndexBy rightSym (RotationSteps 2) u
   u4 = reflectIndex rightSym u
   u6 = reflectIndex rightSym u2
 
 -- Every distinct oriented tile in the set, alongside its (shared, per-base-tile) weight.
-tileInstances :: TileSetDef -> Array (Tuple TileInstance Number)
+tileInstances :: TileSetDef -> Array (Tuple TileInstance Weight)
 tileInstances def =
   def.tiles >>= \t ->
-    map (\o -> Tuple (TileInstance { name: t.name, orientation: o }) t.weight)
+    map (\(OrientationIndex o) -> Tuple (TileInstance { name: t.name, orientation: o }) (Weight t.weight))
       (distinctOrientations t.symmetry)
 
 -- Build a `PatternCatalog`/`AdjacencyRules` pair directly from a parsed
@@ -174,9 +195,9 @@ buildTileSet def =
   let
     indexed = Array.mapWithIndex (\i (Tuple ti w) -> Tuple (PatternId i) (Tuple ti w)) (tileInstances def)
     patterns = Map.fromFoldable (map (\(Tuple pid (Tuple ti _)) -> Tuple pid (Pattern [ ti ])) indexed)
-    weights = Map.fromFoldable (map (\(Tuple pid (Tuple _ w)) -> Tuple pid w) indexed)
+    weights = Map.fromFoldable (map (\(Tuple pid (Tuple _ (Weight w))) -> Tuple pid w) indexed)
     acc = { nextId: Array.length indexed, byPixels: Map.empty, patterns, weights, origins: Map.empty } :: Accum TileInstance
-    catalog = finalize acc 1
+    catalog = finalize acc (PatternSize 1)
 
     index :: Map TileInstance PatternId
     index = Map.fromFoldable (map (\(Tuple pid (Tuple ti _)) -> Tuple ti pid) indexed)
@@ -184,7 +205,7 @@ buildTileSet def =
     -- Every tile referenced by a `<neighbor>` rule is also declared in
     -- `<tiles>` in every real tileset this parses; `SymX` (cardinality 1)
     -- is a harmless fallback for a malformed file rather than a crash.
-    symOf name = fromMaybe SymX (Map.lookup name symbolsByName)
+    symOf (TileName name) = fromMaybe SymX (Map.lookup name symbolsByName)
     symbolsByName = Map.fromFoldable (map (\t -> Tuple t.name t.symmetry) def.tiles)
 
     facts :: Array RuleFact
@@ -204,16 +225,18 @@ buildTileSet def =
         (Map.singleton fromPid [ toPid ])
         m
 
-    rules = fromNestedMap (Array.length indexed) (Array.foldl addFact Map.empty facts)
+    rules = fromNestedMap (PatternCount (Array.length indexed)) (Array.foldl addFact Map.empty facts)
   in
     { catalog, rules, index }
 
 -- Filter a `TileSetDef` down to a named `<subset>` (identity when
 -- `Nothing`, or when the name doesn't match any declared subset) — keeps
 -- only its tiles, and only the neighbor rules where both sides are in it.
-selectSubset :: Maybe String -> TileSetDef -> TileSetDef
+newtype SubsetName = SubsetName String
+
+selectSubset :: Maybe SubsetName -> TileSetDef -> TileSetDef
 selectSubset Nothing def = def
-selectSubset (Just name) def =
+selectSubset (Just (SubsetName name)) def =
   case Array.find (\s -> s.name == name) def.subsets of
     Nothing -> def
     Just subset ->

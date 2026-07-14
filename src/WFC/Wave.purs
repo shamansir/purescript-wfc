@@ -11,11 +11,11 @@ import Data.Number (log)
 import Data.Set (Set)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
-import WFC.Catalog (PatternCatalog, patternIds, weightOf, wLogWOf)
+import WFC.Catalog (PatternCatalog, WLogW(..), Weight(..), patternIds, weightOf, wLogWOf)
 import WFC.CompatibilityMap (CompatibilityKey(..), CompatibilityMap)
 import WFC.CompatibilityMap as CompatibilityMap
-import WFC.Direction (Direction, allDirections, dirIndex)
-import WFC.Grid (GridSize, Pos(..), allPositions)
+import WFC.Direction (Direction, DirectionIndex(..), allDirections, dirIndex)
+import WFC.Grid (GridSize, OutputPeriodic(..), Pos(..), allPositions)
 import WFC.Pattern (PatternId(..))
 import WFC.Rules (AdjacencyRules, initialCompatCount)
 
@@ -45,7 +45,9 @@ type CompatibilityCell = CompatibilityMap
 -- `resizeWave`; kept positions' `CompatibilityCell`s carry over unchanged,
 -- same as `cells`.
 compatibilityKey :: PatternId -> Direction -> CompatibilityKey
-compatibilityKey (PatternId pid) dir = CompatibilityKey (pid * 4 + dirIndex dir)
+compatibilityKey (PatternId pid) dir =
+  let DirectionIndex di = dirIndex dir
+  in CompatibilityKey (pid * 4 + di)
 
 -- Running totals behind a cell's Shannon entropy (`entropyFromStats` below),
 -- kept incrementally in sync with `cells` by every single ban (see
@@ -58,12 +60,22 @@ type EntropyStats = { sumW :: Number, sumWLogW :: Number }
 
 type EntropyCache = Map Pos EntropyStats
 
+-- Shannon entropy of a cell — distinct from `WFC.Catalog`'s `Weight`/`WLogW`
+-- (the raw ingredients it's computed from), even though all three are
+-- "just a Number". Lives here, not in `WFC.Entropy`, so `WFC.Entropy` (which
+-- imports `WFC.Wave`) can import this type back without a cycle.
+newtype Entropy = Entropy Number
+
+derive newtype instance eqEntropy :: Eq Entropy
+derive newtype instance ordEntropy :: Ord Entropy
+derive newtype instance showEntropy :: Show Entropy
+
 -- Same formula `WFC.Catalog.finalize`'s `startEntropy` and the old
 -- from-scratch `WFC.Entropy.cellEntropy` both use, factored out so the
 -- cached and non-cached paths can't drift apart.
-entropyFromStats :: EntropyStats -> Number
+entropyFromStats :: EntropyStats -> Entropy
 entropyFromStats { sumW, sumWLogW } =
-  if sumW > 0.0 then log sumW - sumWLogW / sumW else 0.0
+  Entropy (if sumW > 0.0 then log sumW - sumWLogW / sumW else 0.0)
 
 -- Stats for a cell still in full superposition — just the catalog's own
 -- precomputed totals, reused (structurally shared, not recomputed) for
@@ -77,8 +89,8 @@ statsForAll catalog = { sumW: catalog.totalW, sumWLogW: catalog.totalWLogW }
 statsForSet :: forall a. PatternCatalog a -> Set PatternId -> EntropyStats
 statsForSet catalog possible =
   let pids = Set.toUnfoldable possible :: Array PatternId
-      sumW = foldl (\acc pid -> acc + weightOf catalog pid) 0.0 pids
-      sumWLogW = foldl (\acc pid -> acc + wLogWOf catalog pid) 0.0 pids
+      sumW = foldl (\acc pid -> let Weight w = weightOf catalog pid in acc + w) 0.0 pids
+      sumWLogW = foldl (\acc pid -> let WLogW w = wLogWOf catalog pid in acc + w) 0.0 pids
   in { sumW, sumWLogW }
 
 type Wave a =
@@ -108,9 +120,9 @@ initWave
   .  PatternCatalog a
   -> AdjacencyRules
   -> GridSize
-  -> Boolean
+  -> OutputPeriodic
   -> Wave a
-initWave catalog rules size periodic =
+initWave catalog rules size (OutputPeriodic periodic) =
   let ids      = patternIds catalog
       allPids  = Set.fromFoldable ids
       initCell = Just allPids
@@ -160,9 +172,14 @@ resizeWave newSize wave =
 getCellPossibilities :: forall a. Wave a -> Pos -> Maybe (Set PatternId)
 getCellPossibilities wave pos = fromMaybe Nothing (Map.lookup pos wave.cells)
 
+newtype FullyCollapsed = FullyCollapsed Boolean
+
+derive newtype instance eqFullyCollapsed :: Eq FullyCollapsed
+derive newtype instance showFullyCollapsed :: Show FullyCollapsed
+
 -- True when every cell is collapsed to exactly one pattern.
-isFullyCollapsed :: forall a. Wave a -> Boolean
-isFullyCollapsed wave = all isSingleton (Map.values wave.cells)
+isFullyCollapsed :: forall a. Wave a -> FullyCollapsed
+isFullyCollapsed wave = FullyCollapsed (all isSingleton (Map.values wave.cells))
   where
     isSingleton Nothing   = false
     isSingleton (Just s)  = Set.size s == 1

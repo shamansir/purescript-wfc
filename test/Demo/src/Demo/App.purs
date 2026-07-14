@@ -33,15 +33,16 @@ import Demo.TileSamples as TileSamples
 import Demo.WorkerProtocol (Grid, CellSnapshot)
 import Demo.WorkerProtocol as WP
 import Demo.XmlTileSamples (xmlTileSamples)
-import WFC.Catalog (PatternCatalog, extractPatterns, lastPatternId, patternsWithIds)
-import WFC.Pattern (Pattern(..), PatternId)
+import WFC.Catalog (InputPeriodic(..), PatternCatalog, extractPatterns, lastPatternId, patternsWithIds)
+import WFC.Pattern (Pattern(..), PatternId, PatternSize(..), UseMirror(..), UseRotations(..))
 import WFC.PatternMap as PatternMap
 import WFC.Propagate (applyGround)
 import WFC.Rules (buildRules)
 import WFC.Tiles (buildTiledCatalog, buildTiledRules)
-import WFC.TileSet.Xml (parseTileSetXml)
+import WFC.TileSet.Xml (XmlParseError(..), XmlSource(..), parseTileSetXml)
 import WFC.TileSet as TS
-import WFC.TileSet.Symmetry (distinctOrientations)
+import WFC.TileSet.Symmetry (OrientationIndex(..), distinctOrientations)
+import WFC.Grid (OutputPeriodic(..))
 import WFC.Wave (Wave, initWave)
 import Web.Event.Event as Event
 import Web.File.FileList as FileList
@@ -507,7 +508,7 @@ tileImageSrc dir unique ref =
 allTileImageSrcs :: String -> TS.TileSetDef -> Array String
 allTileImageSrcs dir def =
   Array.nub $ def.tiles >>= \t ->
-    map (\o -> tileImageSrc dir def.unique { name: t.name, orientation: o })
+    map (\(OrientationIndex o) -> tileImageSrc dir def.unique { name: t.name, orientation: o })
       (distinctOrientations t.symmetry)
 
 loadTilesetImage :: String -> Aff (Maybe Canvas.CanvasImageSource)
@@ -1361,7 +1362,7 @@ renderStats st =
   let catInfo = case st.catalog of
         Nothing  -> "No patterns"
         Just cat ->
-          show (PatternMap.length cat.patterns) <> " patterns, size "
+          (\(PatternMap.PatternCount n) -> show n) (PatternMap.length cat.patterns) <> " patterns, size "
           <> show cat.size <> "×" <> show cat.size
       lastMs = fromMaybe 0.0 (Array.last st.stepTimes)
       segments = iterationStepCounts st.progressLog
@@ -1485,7 +1486,7 @@ renderPatterns st =
             [ HH.text
                 ( (if st.showPats then "▲ " else "▼ ")
                   <> (if patternsStale st then "~" else "")
-                  <> "Patterns (" <> show (PatternMap.length cat.patterns) <> ")"
+                  <> "Patterns (" <> (\(PatternMap.PatternCount n) -> show n) (PatternMap.length cat.patterns) <> ")"
                 )
             ]
         , if st.showPats
@@ -1727,8 +1728,8 @@ handleAction = case _ of
             result <- H.liftAff (Fetch.fetchText def.xmlPath)
             case result of
               Left err -> H.modify_ _ { uploadError = Just err }
-              Right xmlText -> case parseTileSetXml xmlText of
-                Left err   -> H.modify_ _ { uploadError = Just ("XML parse error: " <> err) }
+              Right xmlText -> case parseTileSetXml (XmlSource xmlText) of
+                Left (XmlParseError err) -> H.modify_ _ { uploadError = Just ("XML parse error: " <> err) }
                 Right def' -> H.modify_ _ { customTileSet = Just def' }
             applySampleDefaults
       _ ->
@@ -1778,11 +1779,11 @@ handleAction = case _ of
               in { cat: b.catalog, rules: b.rules, palette: Just b.palette, tileOf: Just b.tileOf, ground: false }
             _ ->
               let sample = currentSampleDef st
-                  c      = extractPatterns st.patternSize st.inputPeriodic st.useRotations st.useMirror sample.grid
+                  c      = extractPatterns (PatternSize st.patternSize) (InputPeriodic st.inputPeriodic) (UseRotations st.useRotations) (UseMirror st.useMirror) sample.grid
               in { cat: c, rules: buildRules c, palette: Nothing, tileOf: Nothing, ground: sample.ground }
         cat   = built.cat
         rules = built.rules
-        wave0 = initWave cat rules { width: st.outW, height: st.outH } st.outputPeriodic
+        wave0 = initWave cat rules { width: st.outW, height: st.outH } (OutputPeriodic st.outputPeriodic)
         -- Pre-Run display should already show the pinned ground row, same
         -- as the worker's own session does once Run/Step is pressed — a
         -- contradiction here would mean the sample's own bottom row is

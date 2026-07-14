@@ -8,7 +8,7 @@ import Data.Maybe (Maybe(..))
 import Effect (Effect)
 import WFC.Collapse (collapseAt)
 import WFC.Entropy (minEntropyPos)
-import WFC.Propagate (Contradiction)
+import WFC.Propagate (Contradiction, MaxAttempts(..))
 import WFC.Wave (Wave)
 
 -- One WFC step: find the min-entropy cell, collapse it, propagate.
@@ -36,8 +36,8 @@ wfc initialWave = tailRecM go initialWave
         Right (Just wave') -> Loop wave'
 
 -- Restart on contradiction up to maxAttempts times.
-wfcWithRetry :: forall a. Int -> Wave a -> Effect (Maybe (Wave a))
-wfcWithRetry maxAttempts initialWave = tailRecM go maxAttempts
+wfcWithRetry :: forall a. MaxAttempts -> Wave a -> Effect (Maybe (Wave a))
+wfcWithRetry (MaxAttempts maxAttempts) initialWave = tailRecM go maxAttempts
   where
     go 0 = pure (Done Nothing)
     go n = do
