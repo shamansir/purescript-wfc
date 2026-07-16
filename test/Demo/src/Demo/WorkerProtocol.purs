@@ -18,7 +18,7 @@ import WFC.Pattern (Pattern(..), PatternId(..))
 import WFC.Render (topLeftPixel)
 import WFC.Rules (AdjacencyRules)
 import WFC.TileSet (NeighborRule, Subset, TileInstance(..), TileSetDef, buildTileSet)
-import WFC.TileSet.Symmetry (Symmetry(..), parseSymmetry)
+import WFC.TileSet.Symmetry (Symmetry(..), SymmetryCode(..), parseSymmetry)
 import WFC.Wave (Wave, getCellPossibilities)
 
 -- One cell's worker-reported state, plain enough to satisfy `IsSendable`
@@ -102,7 +102,7 @@ toWireTileSet name def =
 fromWireTileSet :: CustomTileSet -> TileSetDef
 fromWireTileSet w =
   { unique: w.unique
-  , tiles: map (\t -> { name: t.name, symmetry: fromMaybe SymX (hush (parseSymmetry t.symmetry)), weight: t.weight }) w.tiles
+  , tiles: map (\t -> { name: t.name, symmetry: fromMaybe SymX (hush (parseSymmetry (SymmetryCode t.symmetry))), weight: t.weight }) w.tiles
   , neighbors: w.neighbors
   , subsets: w.subsets
   }

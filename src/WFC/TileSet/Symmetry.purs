@@ -3,6 +3,8 @@ module WFC.TileSet.Symmetry
   , OrientationIndex(..)
   , OrientationCount(..)
   , RotationSteps(..)
+  , SymmetryCode(..)
+  , SymmetryParseError(..)
   , parseSymmetry
   , cardinality
   , distinctOrientations
@@ -61,14 +63,24 @@ instance showSymmetry :: Show Symmetry where
   show SymT = "T"
   show SymF = "F"
 
-parseSymmetry :: String -> Either String Symmetry
-parseSymmetry "X" = Right SymX
-parseSymmetry "I" = Right SymI
-parseSymmetry "\\" = Right SymDiag
-parseSymmetry "L" = Right SymL
-parseSymmetry "T" = Right SymT
-parseSymmetry "F" = Right SymF
-parseSymmetry other = Left ("unknown tile symmetry: " <> show other)
+-- The raw `symmetry="..."` attribute text, before it's validated into a
+-- `Symmetry` class — distinct from the plain `String` `TileDef.name`/etc.
+-- fields (already labeled there).
+newtype SymmetryCode = SymmetryCode String
+
+newtype SymmetryParseError = SymmetryParseError String
+
+derive newtype instance eqSymmetryParseError :: Eq SymmetryParseError
+derive newtype instance showSymmetryParseError :: Show SymmetryParseError
+
+parseSymmetry :: SymmetryCode -> Either SymmetryParseError Symmetry
+parseSymmetry (SymmetryCode "X") = Right SymX
+parseSymmetry (SymmetryCode "I") = Right SymI
+parseSymmetry (SymmetryCode "\\") = Right SymDiag
+parseSymmetry (SymmetryCode "L") = Right SymL
+parseSymmetry (SymmetryCode "T") = Right SymT
+parseSymmetry (SymmetryCode "F") = Right SymF
+parseSymmetry (SymmetryCode other) = Left (SymmetryParseError ("unknown tile symmetry: " <> show other))
 
 -- How many of a tile's rotations are visually distinct — the size of the
 -- index space `rotateIndex`/`distinctOrientations` operate on for that

@@ -35,7 +35,7 @@ import WFC.Render (renderWave, renderWaveWith)
 import WFC.Tiles (TileDef, SidesMatch(..), buildTiledCatalog, buildTiledRules, sidesMatch)
 import WFC.TileSet as TS
 import WFC.TileSet (TileName(..))
-import WFC.TileSet.Symmetry (OrientationCount(..), OrientationIndex(..), RotationSteps(..), Symmetry(..), cardinality, distinctOrientations, parseSymmetry, rotateIndex, rotateIndexBy)
+import WFC.TileSet.Symmetry (OrientationCount(..), OrientationIndex(..), RotationSteps(..), Symmetry(..), SymmetryCode(..), cardinality, distinctOrientations, parseSymmetry, rotateIndex, rotateIndexBy)
 import WFC.TileSet.Xml (XmlSource(..), XmlParseError(..), parseTileSetXml)
 
 -- ---------------------------------------------------------------------------
@@ -853,13 +853,13 @@ main = runSpecAndExitProcess [consoleReporter] do
         map (rotateIndex SymT) (map OrientationIndex [ 0, 1, 2, 3 ]) `shouldEqual` map OrientationIndex [ 1, 2, 3, 0 ]
 
       it "parseSymmetry accepts all 6 class codes and rejects unknown ones" do
-        parseSymmetry "X" `shouldEqual` Right SymX
-        parseSymmetry "I" `shouldEqual` Right SymI
-        parseSymmetry "\\" `shouldEqual` Right SymDiag
-        parseSymmetry "L" `shouldEqual` Right SymL
-        parseSymmetry "T" `shouldEqual` Right SymT
-        parseSymmetry "F" `shouldEqual` Right SymF
-        parseSymmetry "?" `shouldSatisfy` isLeft
+        parseSymmetry (SymmetryCode "X") `shouldEqual` Right SymX
+        parseSymmetry (SymmetryCode "I") `shouldEqual` Right SymI
+        parseSymmetry (SymmetryCode "\\") `shouldEqual` Right SymDiag
+        parseSymmetry (SymmetryCode "L") `shouldEqual` Right SymL
+        parseSymmetry (SymmetryCode "T") `shouldEqual` Right SymT
+        parseSymmetry (SymmetryCode "F") `shouldEqual` Right SymF
+        parseSymmetry (SymmetryCode "?") `shouldSatisfy` isLeft
 
     describe "expandRule — one declared rule expanded across rotation AND reflection" do
 

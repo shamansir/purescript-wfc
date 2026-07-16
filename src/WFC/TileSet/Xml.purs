@@ -19,7 +19,7 @@ import Data.Number as Number
 import Data.String as String
 import Data.Traversable (traverse)
 import WFC.TileSet (NeighborRule, Subset, TileDef, TileSetDef, Unique(..))
-import WFC.TileSet.Symmetry (parseSymmetry)
+import WFC.TileSet.Symmetry (SymmetryCode(..), SymmetryParseError(..), parseSymmetry)
 import WFC.TileSet.Xml.Vendor (Element, XmlAttribute(..), XmlNode(..), parseXmlDocument)
 
 -- An XML attribute's name (the lookup key, e.g. "name"/"symmetry"/"weight")
@@ -76,7 +76,7 @@ tileFromElement :: Element -> Either XmlParseError TileDef
 tileFromElement el = do
   AttrValue name <- note (XmlParseError "<tile> missing name") (attrValue (AttrName "name") el)
   AttrValue symStr <- note (XmlParseError ("<tile name=\"" <> name <> "\"> missing symmetry")) (attrValue (AttrName "symmetry") el)
-  symmetry <- lmap XmlParseError (parseSymmetry symStr)
+  symmetry <- lmap (\(SymmetryParseError e) -> XmlParseError e) (parseSymmetry (SymmetryCode symStr))
   let weight = fromMaybe 1.0 (attrValue (AttrName "weight") el >>= (\(AttrValue v) -> Number.fromString v))
   pure { name, symmetry, weight }
 
