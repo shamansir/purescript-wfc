@@ -7,17 +7,23 @@ import Data.Argonaut.Decode.Error (printJsonDecodeError)
 import Data.Argonaut.Decode.Parser (parseJson)
 import Data.Argonaut.Encode.Class (encodeJson)
 import Data.Either (Either(..))
-import Data.Maybe (Maybe(..))
+import Data.Foldable (for_)
+import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Time.Duration (Milliseconds(..))
+import Effect.Aff (Aff, delay, launchAff_)
 import Effect.Class (liftEffect)
+import Effect.Ref (Ref)
 import Effect.Ref as Ref
 import HTTPurple
   ( class Generic
   , Method(..)
   , Request
+  , ResponseHeaders
   , ResponseM
   , RouteDuplex'
   , ServerM
   , badRequest'
+  , headers
   , jsonHeaders
   , noArgs
   , notFound
@@ -31,8 +37,12 @@ import HTTPurple
   )
 import HTTPurple.Status as Status
 import HTTPurple.Body (RequestBody, toString)
+import Node.Encoding (Encoding(UTF8))
+import Node.EventEmitter as EE
+import Node.Stream (Duplex)
+import Node.Stream as Stream
 import Server.Codec (decodeCreateRequest, errorJson)
-import Server.Engine (CreateRequest, solveSync, statusOf)
+import Server.Engine (CreateRequest, Snapshot, initialSnapshot, solveSync, statusOf)
 import Server.Session (Store)
 import Server.Session as Session
 
@@ -48,6 +58,7 @@ data Route
   | SessionRun String
   | SessionStop String
   | SessionHistory String
+  | SessionEvents String
 
 derive instance genericRoute :: Generic Route _
 
@@ -60,6 +71,7 @@ routeDuplex = root $ sum
   , "SessionRun": "sessions" / segment / "run"
   , "SessionStop": "sessions" / segment / "stop"
   , "SessionHistory": "sessions" / segment / "history"
+  , "SessionEvents": "sessions" / segment / "events"
   }
 
 -- ---------------------------------------------------------------------------
@@ -126,6 +138,80 @@ handleHistory store sid = do
       sd <- liftEffect (Ref.read entry.dataRef)
       ok' jsonHeaders (stringify (encodeJson { id: sid, history: sd.history }))
 
+sseHeaders :: ResponseHeaders
+sseHeaders = headers
+  { "Content-Type": "text/event-stream"
+  , "Cache-Control": "no-cache"
+  , "Connection": "keep-alive"
+  }
+
+isTerminalKind :: String -> Boolean
+isTerminalKind k = k == "solved" || k == "contradiction" || k == "timedOut"
+
+sseEvent :: Snapshot -> String
+sseEvent snap = "data: " <> stringify (encodeJson snap) <> "\n\n"
+
+-- A silent comment line, just to keep an otherwise-idle connection alive
+-- through any proxy/load balancer sitting in front of this that would
+-- otherwise time out a long-quiet stream (SSE's own spec-sanctioned
+-- keep-alive mechanism — a line starting with `:` is a comment, ignored by
+-- `EventSource` but still resets the client/proxy's read timeout).
+heartbeatLoop :: Ref Boolean -> Duplex -> Aff Unit
+heartbeatLoop closedRef stream = do
+  delay (Milliseconds 15000.0)
+  closed <- liftEffect (Ref.read closedRef)
+  if closed then pure unit
+  else do
+    liftEffect (void (Stream.writeString stream UTF8 ": keep-alive\n\n"))
+    heartbeatLoop closedRef stream
+
+-- GET /sessions/:id/events — Server-Sent Events. Pushes the session's
+-- current snapshot immediately (so a client connecting mid-run isn't
+-- staring at a blank state until the next step happens to land), then
+-- every subsequent one as `/step`/`/run` (whichever is actually driving
+-- the session — this route only *observes*, it never steps anything
+-- itself) records it, until the session reaches a terminal state or the
+-- client disconnects.
+handleEvents :: Store -> String -> ResponseM
+handleEvents store sid = do
+  mEntry <- liftEffect (Session.getSession store sid)
+  case mEntry of
+    Nothing -> notFound
+    Just entry -> do
+      passThrough <- liftEffect Stream.newPassThrough
+      closedRef <- liftEffect (Ref.new false)
+      subIdRef <- liftEffect (Ref.new Nothing)
+
+      let
+        closeStream = do
+          already <- Ref.read closedRef
+          when (not already) do
+            Ref.write true closedRef
+            mSubId <- Ref.read subIdRef
+            for_ mSubId (Session.unsubscribe entry)
+            Stream.end passThrough
+
+        push snap = do
+          closed <- Ref.read closedRef
+          when (not closed) do
+            void (Stream.writeString passThrough UTF8 (sseEvent snap))
+            when (isTerminalKind snap.kind) closeStream
+
+      liftEffect (EE.on_ Stream.errorH (\_ -> closeStream) passThrough)
+      liftEffect (EE.on_ Stream.closeH closeStream passThrough)
+
+      sd0 <- liftEffect (Ref.read entry.dataRef)
+      liftEffect (push (fromMaybe (initialSnapshot sd0) sd0.lastSnapshot))
+
+      if sd0.finished then
+        liftEffect closeStream
+      else do
+        subId <- liftEffect (Session.subscribe entry push)
+        liftEffect (Ref.write (Just subId) subIdRef)
+        liftEffect (launchAff_ (heartbeatLoop closedRef passThrough))
+
+      response' Status.ok sseHeaders passThrough
+
 -- POST /sessions/:id/step — exactly one unit of work (one plain step, or
 -- one backtrack-step, depending on how the session was created), returned
 -- synchronously.
@@ -180,6 +266,7 @@ router store { method: Post, route: Sessions, body } = handleCreateSession store
 router store { method: Get, route: Session sid } = handleGetSession store sid
 router store { method: Delete, route: Session sid } = handleDeleteSession store sid
 router store { method: Get, route: SessionHistory sid } = handleHistory store sid
+router store { method: Get, route: SessionEvents sid } = handleEvents store sid
 router store { method: Post, route: SessionStep sid } = handleStep store sid
 router store { method: Post, route: SessionRun sid } = handleRun store sid
 router store { method: Post, route: SessionStop sid } = handleStop store sid

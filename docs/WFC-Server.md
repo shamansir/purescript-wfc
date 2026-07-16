@@ -23,7 +23,7 @@ port is currently hardcoded in `server/src/Server/Main.purs`'s `main`.
 | `Server.Codec` | JSON decode of the request body (`CreateRequest`) + input validation. Encoding is done inline at call sites via argonaut's generic `Record` `EncodeJson` instance — every response type here is a plain record, so no hand-written encoders were needed. |
 | `Server.Session` | The in-memory session store (`Ref (Map String SessionEntry)`) and the cancellable background stepping loop. |
 | `Server.Node` | One FFI: `randomId :: Effect String` (`crypto.randomUUID()`), used for session ids. |
-| `Server.Main` | Route table (`routing-duplex`) and HTTP handlers. |
+| `Server.Main` | Route table (`routing-duplex`) and HTTP handlers, including the SSE stream (`Node.Stream`/`Node.EventEmitter` directly — HTTPurple's `Body (Stream r)` instance pipes any `Readable` straight to the response). |
 
 ## Two input modes
 
@@ -215,6 +215,46 @@ Populated by both `/step` and `/run`, capped at the session's own
 `maxHistory` (oldest entries dropped first), or not recorded at all if the
 session was created with `keepHistory: false`.
 
+### `GET /sessions/:id/events` — live progress via Server-Sent Events
+
+An alternative to polling `GET /sessions/:id`: opens a long-lived
+`text/event-stream` connection and pushes a `data: <snapshot JSON>\n\n`
+event for the session's current state immediately, then one more for every
+subsequent snapshot `/step` or `/run` records — until the session reaches a
+terminal `kind` (`solved`/`contradiction`/`timedOut`), at which point the
+server ends the stream itself, or until the client disconnects.
+
+This route is **observe-only** — connecting to it does not itself start or
+advance anything. Pair it with a `POST /sessions/:id/run` (either just
+before or any time after opening the stream) to actually see it solve;
+multiple `/events` connections can watch the same session at once.
+
+```js
+const es = new EventSource(`/sessions/${id}/events`);
+es.onmessage = (ev) => {
+  const snap = JSON.parse(ev.data);
+  render(snap.grid);
+  if (["solved", "contradiction", "timedOut"].includes(snap.kind)) es.close();
+};
+fetch(`/sessions/${id}/run`, { method: "POST" });
+```
+
+A `: keep-alive\n\n` comment line is written every 15s while otherwise idle,
+so a proxy/load balancer sitting in front of this doesn't time out a quiet
+connection mid-solve. On client disconnect, the stream's own `close`/`error`
+events unregister the session's subscriber and stop writing — confirmed by
+killing an open connection mid-run and checking the server keeps running
+the solve to completion without erroring.
+
+Why SSE and not long-polling or WebSockets: a plain blocking `GET` (true
+long-polling) has the same "how long can a client/proxy actually wait on
+one HTTP response" problem this was added to sidestep in the first place.
+WebSockets would add real bidirectional push, but this API doesn't need
+client→server messages over the same connection — `/stop` already works
+fine as an ordinary POST alongside an open `/events` stream — so SSE (plain
+HTTP, no extra protocol handshake, natively retried by `EventSource` on a
+dropped connection) covers the actual need with less machinery.
+
 ### `DELETE /sessions/:id`
 
 ```json
@@ -252,7 +292,9 @@ CLI benchmark's own Ctrl+C handling, see `test/Demo/src/Bench/Main.purs`).
 This means a single very expensive `/step` (a huge grid, or a
 backtracking step that has to unwind a long stack) still blocks the whole
 server for that duration — `/run`'s cancellability is between steps, not
-within one.
+within one. `/events` doesn't change this: it's a passive subscriber woken
+up by the same `notifySubscribers` call `/step`/`/run` already make after
+each step, not a separate polling loop of its own.
 
 ## Known gaps
 
@@ -264,3 +306,7 @@ within one.
 - Value type is fixed to `Int` for both modes (`PatternCatalog Int`) — no
   way to solve over an arbitrary domain type, matching how the CLI
   benchmark and `Demo.Samples` work too.
+- `/events` subscribers live only in `SessionEntry.subscribers`, in memory
+  — no reconnect/replay support beyond the one current-state push a fresh
+  connection gets; a client that misses events during a network blip has
+  no way to ask "what did I miss," only "what's true right now."

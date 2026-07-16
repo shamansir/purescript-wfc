@@ -22,3 +22,6 @@ package:
     - argonaut-core
     - argonaut-codecs
     - foreign-object
+    - node-streams
+    - node-event-emitter
+    - node-buffer
