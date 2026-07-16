@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "pngjs": "^7.0.0"
+    "pngjs": "^7.0.0",
+    "ws": "^8.18.0"
   }
 }

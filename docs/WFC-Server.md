@@ -12,8 +12,11 @@ set, registry `77.10.0`, doesn't have `httpure` itself).
 ```
 
 Builds via the nix dev shell (`spago build`), then runs the compiled ESM
-output directly with plain `node` (`server.mjs`). Listens on `0.0.0.0:8080`,
-port is currently hardcoded in `server/src/Server/Main.purs`'s `main`.
+output directly with plain `node` (`server.mjs`). Starts two listeners —
+the REST/SSE API on `0.0.0.0:8080`, and a WebSocket server on
+`0.0.0.0:8081` (see [WebSockets](#websockets---bidirectional-over-a-second-port)
+below) — both ports currently hardcoded (`httpPort`/`wsPort`) in
+`server/src/Server/Main.purs`'s `main`.
 
 ## Source layout
 
@@ -23,7 +26,9 @@ port is currently hardcoded in `server/src/Server/Main.purs`'s `main`.
 | `Server.Codec` | JSON decode of the request body (`CreateRequest`) + input validation. Encoding is done inline at call sites via argonaut's generic `Record` `EncodeJson` instance — every response type here is a plain record, so no hand-written encoders were needed. |
 | `Server.Session` | The in-memory session store (`Ref (Map String SessionEntry)`) and the cancellable background stepping loop. |
 | `Server.Node` | One FFI: `randomId :: Effect String` (`crypto.randomUUID()`), used for session ids. |
-| `Server.Main` | Route table (`routing-duplex`) and HTTP handlers, including the SSE stream (`Node.Stream`/`Node.EventEmitter` directly — HTTPurple's `Body (Stream r)` instance pipes any `Readable` straight to the response). |
+| `Server.Main` | Route table (`routing-duplex`) and HTTP handlers, including the SSE stream (`Node.Stream`/`Node.EventEmitter` directly — HTTPurple's `Body (Stream r)` instance pipes any `Readable` straight to the response), plus starting the WebSocket listener alongside `serve`. |
+| `Server.Ws` | FFI over the `ws` npm package — no server-side WebSocket library exists in this workspace's package set (only `web-socket`, the browser-client bindings). |
+| `Server.WsServer` | The WebSocket protocol: decodes incoming `{"cmd": ...}` messages, dispatches to the same `Server.Session` functions the REST handlers use, replies/pushes `{"type": ...}` messages. |
 
 ## Two input modes
 
@@ -246,14 +251,90 @@ events unregister the session's subscriber and stop writing — confirmed by
 killing an open connection mid-run and checking the server keeps running
 the solve to completion without erroring.
 
-Why SSE and not long-polling or WebSockets: a plain blocking `GET` (true
-long-polling) has the same "how long can a client/proxy actually wait on
-one HTTP response" problem this was added to sidestep in the first place.
-WebSockets would add real bidirectional push, but this API doesn't need
-client→server messages over the same connection — `/stop` already works
-fine as an ordinary POST alongside an open `/events` stream — so SSE (plain
-HTTP, no extra protocol handshake, natively retried by `EventSource` on a
-dropped connection) covers the actual need with less machinery.
+Why SSE and not long-polling: a plain blocking `GET` (true long-polling)
+has the same "how long can a client/proxy actually wait on one HTTP
+response" problem this was added to sidestep in the first place. SSE is
+plain HTTP, no extra protocol handshake, and `EventSource` retries a
+dropped connection natively — the right default when a client only needs
+to *receive* progress and can still issue commands as ordinary POSTs (as
+every example above does). See [WebSockets](#websockets---bidirectional-over-a-second-port)
+below for the case where a client wants both directions over one
+connection instead.
+
+## WebSockets — bidirectional, over a second port
+
+`ws://<host>:8081` (`wsPort` in `Server.Main`, separate from the REST/SSE
+server on `8080` — HTTPurple owns that server's `upgrade` handling
+internally and doesn't expose it, so this runs its own listener via the
+`ws` npm package instead). Every connected client sends and receives plain
+JSON messages on the same socket; there's no routing-duplex path structure
+here, just a `"cmd"`/`"type"`-tagged protocol handled by
+`Server.WsServer`.
+
+Session logic itself is completely unchanged from the REST API — every
+command below just calls the same `Server.Session` functions the HTTP
+handlers do (`Session.createSession`, `Session.stepOnce`,
+`Session.startRun`, ...). Concretely, that means a step taken over one
+WebSocket connection is visible on any other subscriber — another
+WebSocket connection, or an SSE `/events` stream — via the session's
+existing `subscribe`/`notifySubscribers` mechanism, and vice versa: they
+all share the one in-memory `Store`.
+
+### Client → server commands
+
+| `cmd` | Fields | Effect |
+|---|---|---|
+| `create` | same body as `POST /sessions` (flattened alongside `cmd`) | Creates a session, replies `created`. |
+| `subscribe` | `id` | Immediately replies with the current snapshot (`snapshot`), then pushes one more for every future step until `unsubscribe`d or the connection closes. |
+| `unsubscribe` | `id` | Stops future pushes for that session; the connection itself stays open. |
+| `step` | `id` | One unit of work, same as `POST /sessions/:id/step`. |
+| `run` | `id` | Starts/resumes the background loop, same as `POST /sessions/:id/run`; replies `status`. |
+| `stop` | `id` | Cancels an in-flight run, same as `POST /sessions/:id/stop`; replies `status` with `lastStep`. |
+| `get` | `id` | Current status, same shape as `GET /sessions/:id`. |
+| `delete` | `id` | Same as `DELETE /sessions/:id`; replies `deleted`. |
+
+### Server → client messages
+
+| `type` | Meaning |
+|---|---|
+| `created` | Reply to `create`: `{ type, id, status, snapshot }`. |
+| `snapshot` | A step, pushed to every connection `subscribe`d to that `id`: `{ type, id, snapshot }`. |
+| `status` | Reply to `run`/`stop`/`get`: `{ type, id, status, ... }` (`stop`/`get` also include `lastStep`/`lastSnapshot` respectively, matching their REST counterparts). |
+| `deleted` | Reply to `delete`: `{ type, id }`. |
+| `error` | Malformed JSON, an unknown `cmd`, or `id` not found: `{ type, message, id? }`. |
+
+A `step`/`run` command's own reply is skipped — not sent twice — for a
+session the same connection is already `subscribe`d to, since
+`stepOnce`/the run loop already notify every subscriber (this connection
+included) independently of the command reply; without that check, a
+subscribed connection driving its own session would see each snapshot
+twice on the one socket. (A REST `/step` response and an SSE viewer don't
+have this problem — they're two separate connections.)
+
+```js
+const ws = new WebSocket("ws://localhost:8081");
+ws.onopen = () => ws.send(JSON.stringify({
+  cmd: "create", mode: "matrix", matrix: [[0,1,0],[1,0,1],[0,1,0]],
+  patternSize: 2, inputPeriodic: true, outputPeriodic: true,
+  outputWidth: 30, outputHeight: 30, backtracking: true, maxAttempts: 50
+}));
+ws.onmessage = (ev) => {
+  const msg = JSON.parse(ev.data);
+  if (msg.type === "created") {
+    ws.send(JSON.stringify({ cmd: "subscribe", id: msg.id }));
+    ws.send(JSON.stringify({ cmd: "run", id: msg.id }));
+  }
+  if (msg.type === "snapshot") render(msg.snapshot.grid);
+};
+```
+
+Verified: two independent connections, one issuing `create`/`run`, the
+other only `subscribe`d, the second receiving every step without ever
+sending a command of its own; malformed JSON and unknown-`id`/unknown-`cmd`
+messages each get a clean `error` reply without affecting the connection or
+the server; abruptly terminating a connection mid-`run` (`ws.terminate()`,
+no close handshake) leaves the run itself completing normally in the
+background with no error surfaced anywhere.
 
 ### `DELETE /sessions/:id`
 
@@ -310,3 +391,12 @@ each step, not a separate polling loop of its own.
   — no reconnect/replay support beyond the one current-state push a fresh
   connection gets; a client that misses events during a network blip has
   no way to ask "what did I miss," only "what's true right now."
+- The WebSocket server is a second, independent listener (`wsPort`) rather
+  than sharing `httpPort` — a client (or a proxy in front of this) has to
+  know both ports. No ping/pong heartbeat, either (unlike `/events`' SSE
+  keep-alive comment) — a half-dead connection is only noticed on the next
+  write attempt, via the `ws` library's own `readyState` check in
+  `Server.Ws`'s `send`.
+- Neither WebSocket connections nor SSE streams carry any auth/identity —
+  same "not intended past localhost/a trusted network" caveat as the REST
+  API, just now on two more ports.

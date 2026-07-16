@@ -45,6 +45,7 @@ import Server.Codec (decodeCreateRequest, errorJson)
 import Server.Engine (CreateRequest, Snapshot, initialSnapshot, solveSync, statusOf)
 import Server.Session (Store)
 import Server.Session as Session
+import Server.WsServer as WsServer
 
 -- ---------------------------------------------------------------------------
 -- Routes
@@ -272,7 +273,18 @@ router store { method: Post, route: SessionRun sid } = handleRun store sid
 router store { method: Post, route: SessionStop sid } = handleStop store sid
 router _ _ = notFound
 
+httpPort :: Int
+httpPort = 8080
+
+-- Separate port, not a path on `httpPort` — HTTPurple owns that server's
+-- upgrade handling internally and doesn't expose it, so the WebSocket
+-- server (`Server.WsServer`, `ws` npm package) runs its own listener
+-- instead, sharing the same in-memory `Store` as the REST/SSE one.
+wsPort :: Int
+wsPort = 8081
+
 main :: ServerM
 main = do
   store <- Session.newStore
-  serve { port: 8080 } { route: routeDuplex, router: router store }
+  WsServer.startWsServer store wsPort
+  serve { port: httpPort } { route: routeDuplex, router: router store }
