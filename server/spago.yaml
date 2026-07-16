@@ -1,0 +1,24 @@
+package:
+  name: server
+  dependencies:
+    - wfc
+    - prelude
+    - effect
+    - aff
+    - console
+    - now
+    - datetime
+    - refs
+    - arrays
+    - ordered-collections
+    - maybe
+    - either
+    - integers
+    - numbers
+    - tuples
+    - strings
+    - foldable-traversable
+    - httpurple
+    - argonaut-core
+    - argonaut-codecs
+    - foreign-object
