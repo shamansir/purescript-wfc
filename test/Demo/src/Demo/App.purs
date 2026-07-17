@@ -1029,6 +1029,11 @@ renderOption i name =
 -- result grid size, both editable before Extract; default to the active
 -- sample's own numbers (kept in sync by `sampleDefaults` whenever the
 -- source changes) rather than some fixed constant.
+-- Input-side settings (how patterns get extracted from the source — only
+-- meaningful for the overlapping model) and output-side settings (the
+-- result wave's own size/periodicity — meaningful for every source kind)
+-- are different concerns that happen to both be "settings you pick before
+-- Extract", so keep them visually apart instead of one flat control strip.
 renderSizeControls :: State -> H.ComponentHTML Action Slots Aff
 renderSizeControls st =
   HH.div
@@ -1036,77 +1041,85 @@ renderSizeControls st =
     ( ( if not (isOverlappingSource (sourceKindOf st)) then []
         else
           [ HH.div
-              [ HP.class_ (H.ClassName "size-label") ]
-              ( [ HH.text "Pattern size: " ] <> map (renderSizeRadio st.patternSize) [ 1, 2, 3, 4 ] )
-          , HH.label
-              [ HP.class_ (H.ClassName "size-label") ]
-              [ HH.input
-                  [ HP.type_ HP.InputCheckbox
-                  , HP.checked st.useRotations
-                  , HE.onChecked \_ -> ToggleRotations
+              [ HP.class_ (H.ClassName "control-group") ]
+              [ HH.div [ HP.class_ (H.ClassName "control-group-title") ] [ HH.text "Input" ]
+              , HH.div
+                  [ HP.class_ (H.ClassName "size-label") ]
+                  ( [ HH.text "Pattern size: " ] <> map (renderSizeRadio st.patternSize) [ 1, 2, 3, 4 ] )
+              , HH.label
+                  [ HP.class_ (H.ClassName "size-label") ]
+                  [ HH.input
+                      [ HP.type_ HP.InputCheckbox
+                      , HP.checked st.useRotations
+                      , HE.onChecked \_ -> ToggleRotations
+                      ]
+                  , HH.text " Rotate"
                   ]
-              , HH.text " Rotate"
-              ]
-          , HH.label
-              [ HP.class_ (H.ClassName "size-label") ]
-              [ HH.input
-                  [ HP.type_ HP.InputCheckbox
-                  , HP.checked st.useMirror
-                  , HE.onChecked \_ -> ToggleMirror
+              , HH.label
+                  [ HP.class_ (H.ClassName "size-label") ]
+                  [ HH.input
+                      [ HP.type_ HP.InputCheckbox
+                      , HP.checked st.useMirror
+                      , HE.onChecked \_ -> ToggleMirror
+                      ]
+                  , HH.text " Mirror"
                   ]
-              , HH.text " Mirror"
-              ]
-          , HH.label
-              [ HP.class_ (H.ClassName "size-label") ]
-              [ HH.input
-                  [ HP.type_ HP.InputCheckbox
-                  , HP.checked st.inputPeriodic
-                  , HE.onChecked \_ -> ToggleInputPeriodic
+              , HH.label
+                  [ HP.class_ (H.ClassName "size-label") ]
+                  [ HH.input
+                      [ HP.type_ HP.InputCheckbox
+                      , HP.checked st.inputPeriodic
+                      , HE.onChecked \_ -> ToggleInputPeriodic
+                      ]
+                  , HH.text " Periodic input"
                   ]
-              , HH.text " Periodic input"
               ]
           ]
       )
       <>
-      [ HH.label
-          [ HP.class_ (H.ClassName "size-label") ]
-          [ HH.input
-              [ HP.type_ HP.InputCheckbox
-              , HP.checked st.outputPeriodic
-              , HE.onChecked \_ -> ToggleOutputPeriodic
+      [ HH.div
+          [ HP.class_ (H.ClassName "control-group") ]
+          [ HH.div [ HP.class_ (H.ClassName "control-group-title") ] [ HH.text "Output" ]
+          , HH.label
+              [ HP.class_ (H.ClassName "size-label") ]
+              [ HH.input
+                  [ HP.type_ HP.InputCheckbox
+                  , HP.checked st.outputPeriodic
+                  , HE.onChecked \_ -> ToggleOutputPeriodic
+                  ]
+              , HH.text " Periodic output"
               ]
-          , HH.text " Periodic output"
-          ]
-      , HH.label
-          [ HP.class_ (H.ClassName "size-label") ]
-          [ HH.text "Result W: "
-          , HH.input
-              [ HP.type_ HP.InputNumber
-              , HP.value (show st.outW)
-              , HP.min 1.0
-              , HP.max 64.0
-              , HE.onValueChange (\v -> SetOutW (clampInt 1 64 (fromMaybe st.outW (Int.fromString v))))
+          , HH.label
+              [ HP.class_ (H.ClassName "size-label") ]
+              [ HH.text "Result W: "
+              , HH.input
+                  [ HP.type_ HP.InputNumber
+                  , HP.value (show st.outW)
+                  , HP.min 1.0
+                  , HP.max 64.0
+                  , HE.onValueChange (\v -> SetOutW (clampInt 1 64 (fromMaybe st.outW (Int.fromString v))))
+                  ]
               ]
-          ]
-      , HH.label
-          [ HP.class_ (H.ClassName "size-label") ]
-          [ HH.text "Result H: "
-          , HH.input
-              [ HP.type_ HP.InputNumber
-              , HP.value (show st.outH)
-              , HP.min 1.0
-              , HP.max 64.0
-              , HE.onValueChange (\v -> SetOutH (clampInt 1 64 (fromMaybe st.outH (Int.fromString v))))
+          , HH.label
+              [ HP.class_ (H.ClassName "size-label") ]
+              [ HH.text "Result H: "
+              , HH.input
+                  [ HP.type_ HP.InputNumber
+                  , HP.value (show st.outH)
+                  , HP.min 1.0
+                  , HP.max 64.0
+                  , HE.onValueChange (\v -> SetOutH (clampInt 1 64 (fromMaybe st.outH (Int.fromString v))))
+                  ]
               ]
-          ]
-      , HH.label
-          [ HP.class_ (H.ClassName "size-label") ]
-          [ HH.input
-              [ HP.type_ HP.InputCheckbox
-              , HP.checked st.fixOutputSize
-              , HE.onChecked \_ -> ToggleFixOutputSize
+          , HH.label
+              [ HP.class_ (H.ClassName "size-label") ]
+              [ HH.input
+                  [ HP.type_ HP.InputCheckbox
+                  , HP.checked st.fixOutputSize
+                  , HE.onChecked \_ -> ToggleFixOutputSize
+                  ]
+              , HH.text " Fix"
               ]
-          , HH.text " Fix"
           ]
       ]
     )
