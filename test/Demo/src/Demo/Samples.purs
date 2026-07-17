@@ -15,7 +15,7 @@ type SampleDef =
 
 checkerboard :: SampleDef
 checkerboard =
-  { name: "Checkerboard"
+  { name: "Checkerboard (inline)"
   , grid:
       [ [0, 1, 0, 1, 0, 1]
       , [1, 0, 1, 0, 1, 0]
@@ -32,32 +32,9 @@ checkerboard =
   , ground: false
   }
 
-rooms :: SampleDef
-rooms =
-  { name: "Rooms"
-  , grid:
-      [ [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-      , [0, 1, 1, 1, 0, 1, 1, 1, 1, 0]
-      , [0, 1, 1, 1, 0, 1, 1, 1, 1, 0]
-      , [0, 1, 1, 1, 0, 1, 1, 1, 1, 0]
-      , [0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
-      , [0, 1, 0, 1, 1, 1, 1, 1, 1, 0]
-      , [0, 1, 0, 0, 0, 0, 0, 1, 1, 0]
-      , [0, 1, 1, 1, 1, 1, 0, 1, 1, 0]
-      , [0, 1, 1, 1, 1, 1, 0, 1, 1, 0]
-      , [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-      ]
-  , palette: \v -> if v == 0 then "#1a1a2e" else "#e0e0ff"
-  , outW: 20
-  , outH: 20
-  , n: 3
-  , periodic: false
-  , ground: false
-  }
-
-knot :: SampleDef
-knot =
-  { name: "Knot"
+greekPattern :: SampleDef
+greekPattern =
+  { name: "Greek pattern (inline)"
   , grid:
       [ [0, 0, 0, 0, 0, 0, 0, 0, 0]
       , [0, 1, 1, 1, 0, 1, 1, 1, 0]
@@ -77,9 +54,9 @@ knot =
   , ground: false
   }
 
-circuit :: SampleDef
-circuit =
-  { name: "Circuit"
+azulejo :: SampleDef
+azulejo =
+  { name: "Azulejo (inline)"
   , grid:
       [ [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
       , [0, 1, 1, 2, 0, 0, 2, 1, 1, 0]
@@ -104,12 +81,12 @@ circuit =
   }
 
 -- Patterns below inspired by the overlapping-model samples in
--- https://github.com/mxgmn/WaveFunctionCollapse (Maze, Cave, Skyline, Village),
--- hand-authored as small int grids since this repo has no bitmap loader.
+-- https://github.com/mxgmn/WaveFunctionCollapse (Maze, Cave, Village), hand-
+-- authored as small int grids since this repo has no bitmap loader.
 
 maze :: SampleDef
 maze =
-  { name: "Maze"
+  { name: "Maze (inline)"
   , grid:
       [ [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
       , [1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
@@ -131,9 +108,9 @@ maze =
   , ground: false
   }
 
-cave :: SampleDef
-cave =
-  { name: "Cave"
+theEye :: SampleDef
+theEye =
+  { name: "The Eye (inline)"
   , grid:
       [ [1, 1, 1, 1, 0, 0, 1, 1, 1, 1]
       , [1, 1, 0, 0, 0, 0, 0, 0, 1, 1]
@@ -154,40 +131,9 @@ cave =
   , ground: false
   }
 
-skyline :: SampleDef
-skyline =
-  { name: "Skyline"
-  , grid:
-      -- buildings run full height (columns), not a mountain silhouette:
-      -- see https://github.com/mxgmn/WaveFunctionCollapse/raw/master/images/wfc.png (top row)
-      [ [0, 1, 1, 0, 1, 0, 0, 1, 1, 2, 0, 1, 2, 0, 1, 0, 1, 1, 2, 0, 0, 2, 1]
-      , [0, 2, 1, 0, 1, 0, 0, 2, 1, 2, 0, 2, 1, 0, 1, 0, 1, 2, 1, 0, 0, 2, 1]
-      , [0, 1, 2, 0, 2, 0, 0, 1, 2, 1, 0, 1, 2, 0, 2, 0, 2, 1, 2, 0, 0, 1, 2]
-      , [0, 2, 1, 0, 1, 0, 0, 2, 1, 2, 0, 2, 1, 0, 1, 0, 1, 2, 1, 0, 0, 2, 1]
-      , [0, 1, 2, 0, 2, 0, 0, 1, 2, 1, 0, 1, 2, 0, 2, 0, 2, 1, 2, 0, 0, 1, 2]
-      , [0, 2, 1, 0, 1, 0, 0, 2, 1, 2, 0, 2, 1, 0, 1, 0, 1, 2, 1, 0, 0, 2, 1]
-      , [0, 1, 2, 0, 2, 0, 0, 1, 2, 1, 0, 1, 2, 0, 2, 0, 2, 1, 2, 0, 0, 1, 2]
-      , [0, 2, 1, 0, 1, 0, 0, 2, 1, 2, 0, 2, 1, 0, 1, 0, 1, 2, 1, 0, 0, 2, 1]
-      , [0, 1, 2, 0, 2, 0, 0, 1, 2, 1, 0, 1, 2, 0, 2, 0, 2, 1, 2, 0, 0, 1, 2]
-      , [0, 2, 1, 0, 1, 0, 0, 2, 1, 2, 0, 2, 1, 0, 1, 0, 1, 2, 1, 0, 0, 2, 1]
-      , [0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1]
-      , [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
-      ]
-  , palette: \v ->
-      if v == 0 then "#050505"
-      else if v == 1 then "#1c5f5f"
-      else if v == 2 then "#f4d03f"
-      else "#8a8f96"
-  , outW: 46
-  , outH: 24
-  , n: 3
-  , periodic: true
-  , ground: true
-  }
-
 village :: SampleDef
 village =
-  { name: "Village"
+  { name: "Village (inline)"
   , grid:
       [ [1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1]
       , [1, 2, 2, 1, 2, 0, 0, 1, 2, 2, 1, 1]
@@ -214,4 +160,4 @@ village =
   }
 
 samples :: Array SampleDef
-samples = [ checkerboard, rooms, knot, circuit, maze, cave, skyline, village ]
+samples = [ checkerboard, greekPattern, azulejo, maze, theEye, village ]
