@@ -904,32 +904,23 @@ component = H.mkComponent
 -- Render
 -- ---------------------------------------------------------------------------
 
+-- Desktop: `.sidebar` is one column (`sidebar-top` then `sidebar-bottom`,
+-- stacked — see index.html's CSS), same look as before this was split.
+-- Portrait: `.sidebar` switches to `display:contents`, which promotes
+-- `sidebar-top`/`sidebar-bottom` to direct children of `.demo`'s own
+-- (column) flex layout, so each can carry its own `order` independently
+-- of `.main-view`/`.run-panel` — the split exists specifically so the
+-- portrait order (selector+config, source preview, Extract, run controls,
+-- canvas+grid, patterns+rules) can interleave `.main-view`/`.run-panel`
+-- between `sidebar-top` and `sidebar-bottom`, which a single `.sidebar`
+-- block could never do no matter what `order` it was given.
 render :: State -> H.ComponentHTML Action Slots Aff
 render st =
   HH.div
     [ HP.class_ (H.ClassName "demo") ]
-    [ renderMobileTopControls st
-    , renderSidebar st
+    [ renderSidebar st
     , renderMain st
     , renderRunPanel st
-    ]
-
--- A second copy of the Extract button (`renderSourceControls`) and the
--- Step/Reset/Run/Pause row (`renderRunControls`) — same render functions,
--- called again, so both copies stay driven by the exact same state/actions
--- as the originals inside `.sidebar`/`.run-panel`, nothing to keep in sync
--- by hand. `display:none` outside portrait (see index.html's CSS), where
--- it's the only way to get these two controls — normally deep inside two
--- different, otherwise-unmoved blocks — to the very top without actually
--- restructuring `.sidebar`/`.run-panel` (and risking the desktop layout
--- they're tuned for). The CSS also hides the *original* copies of these
--- two specific blocks in portrait, so nothing doubles up on screen.
-renderMobileTopControls :: State -> H.ComponentHTML Action Slots Aff
-renderMobileTopControls st =
-  HH.div
-    [ HP.class_ (H.ClassName "mobile-top-controls") ]
-    [ renderSourceControls st
-    , renderRunControls st
     ]
 
 -- Sample source: picking/building/inspecting the pattern source, not
@@ -939,11 +930,19 @@ renderMobileTopControls st =
 -- "(Tileset)" XML-parsed) — see `sourceKindOf`/the offset helpers above.
 renderSidebar :: State -> H.ComponentHTML Action Slots Aff
 renderSidebar st =
+  HH.div
+    [ HP.class_ (H.ClassName "sidebar") ]
+    [ renderSidebarTop st
+    , renderSidebarBottom st
+    ]
+
+renderSidebarTop :: State -> H.ComponentHTML Action Slots Aff
+renderSidebarTop st =
   let sampleNames =
         map _.name samples <> map _.name imageSamples <> map _.name TileSamples.samples <> map _.name xmlTileSamples
   in
   HH.div
-    [ HP.class_ (H.ClassName "sidebar") ]
+    [ HP.class_ (H.ClassName "sidebar-top") ]
     [ HH.select
         [ HE.onSelectedIndexChange SelectSample ]
         (Array.mapWithIndex renderOption sampleNames)
@@ -951,7 +950,13 @@ renderSidebar st =
     , renderSizeControls st
     , renderSourcePreview st
     , renderSourceControls st
-    , renderPatterns st
+    ]
+
+renderSidebarBottom :: State -> H.ComponentHTML Action Slots Aff
+renderSidebarBottom st =
+  HH.div
+    [ HP.class_ (H.ClassName "sidebar-bottom") ]
+    [ renderPatterns st
     , renderRules st
     ]
 
@@ -1030,13 +1035,9 @@ renderSizeControls st =
     [ HP.class_ (H.ClassName "size-controls") ]
     ( ( if not (isOverlappingSource (sourceKindOf st)) then []
         else
-          [ HH.label
+          [ HH.div
               [ HP.class_ (H.ClassName "size-label") ]
-              [ HH.text "Pattern size: "
-              , HH.select
-                  [ HE.onSelectedIndexChange (\i -> SetPatternSize (i + 1)) ]
-                  (map (renderSizeOption st.patternSize) [ 1, 2, 3, 4 ])
-              ]
+              ( [ HH.text "Pattern size: " ] <> map (renderSizeRadio st.patternSize) [ 1, 2, 3, 4 ] )
           , HH.label
               [ HP.class_ (H.ClassName "size-label") ]
               [ HH.input
@@ -1110,11 +1111,18 @@ renderSizeControls st =
       ]
     )
 
-renderSizeOption :: Int -> Int -> H.ComponentHTML Action Slots Aff
-renderSizeOption current n =
-  HH.option
-    [ HP.value (show n), HP.selected (n == current) ]
-    [ HH.text (show n <> "×" <> show n) ]
+renderSizeRadio :: Int -> Int -> H.ComponentHTML Action Slots Aff
+renderSizeRadio current n =
+  HH.label
+    [ HP.class_ (H.ClassName "size-radio") ]
+    [ HH.input
+        [ HP.type_ HP.InputRadio
+        , HP.name "pattern-size"
+        , HP.checked (n == current)
+        , HE.onChecked \_ -> SetPatternSize n
+        ]
+    , HH.text (show n <> "×" <> show n)
+    ]
 
 -- What Extract actually reads from: the raw source grid (built-in sample
 -- or uploaded image) for the overlapping model, the raw tile set for the
@@ -1258,6 +1266,7 @@ renderSourceControls st =
     [ HH.button
         [ HE.onClick \_ -> ExtractPatterns
         , HP.class_ (H.ClassName (if patternsStale st then "needs-extract" else ""))
+        , HP.disabled (not (patternsStale st))
         ]
         [ HH.text "◫ Extract" ]
     ]

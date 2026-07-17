@@ -27,9 +27,23 @@
     }
 
     /* ---- Sidebar ---- */
+    /* `.sidebar-top` (selector/config/preview/Extract) and `.sidebar-bottom`
+       (patterns/rules) are two separately-orderable pieces so portrait can
+       interleave `.main-view`/`.run-panel` between them — see the
+       `@media (orientation: portrait)` block below, and Demo.App's
+       `render`/`renderSidebar` doc comment. Each gets the same
+       flex-column/gap `.sidebar` used to have on its direct children, so
+       desktop (where `.sidebar` stays a normal box) looks unchanged. */
     .sidebar {
       width: 280px;
       flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .sidebar-top,
+    .sidebar-bottom {
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -94,6 +108,14 @@
       font-family: inherit;
       font-size: 11px;
       width: 52px;
+    }
+
+    .size-radio {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      margin-right: 8px;
+      cursor: pointer;
     }
 
     /* ---- Controls ---- */
@@ -336,43 +358,32 @@
       }
     }
 
-    /* ---- Portrait-only reorder: Extract + Run controls, then the main
-       canvas, then the history grid — everything else (sample picker,
-       size controls, patterns/rules, stats) follows after. `.mobile-top-
-       controls` is a *second* render of the same Extract button and
-       Step/Reset/Run/Pause row already inside `.sidebar`/`.run-panel`
-       (see Demo.App's `renderMobileTopControls`) — driven by the same
-       state/actions, just positioned at the top; the originals are hidden
-       here so nothing shows twice. Landscape/desktop are untouched. */
-    .mobile-top-controls {
-      display: none;
-    }
-
+    /* ---- Portrait-only reorder: selector+config, source preview, Extract,
+       then run controls, then the main canvas+grid, and only then
+       patterns/rules. `.sidebar` switches to `display: contents` here,
+       which removes *it* from layout while promoting its two children
+       (`.sidebar-top`, `.sidebar-bottom`) to direct flex items of `.demo`
+       — the only way to get `.main-view`/`.run-panel` to land *between*
+       them without duplicating any markup (see Demo.App's `render` doc
+       comment). Landscape/desktop are untouched — `.sidebar` stays a
+       normal box there, so `.sidebar-top`/`.sidebar-bottom` just stack
+       inside it as before. */
     @media (orientation: portrait) {
       .demo {
         flex-direction: column;
       }
 
-      .sidebar, .run-panel {
+      .sidebar {
+        display: contents;
+      }
+
+      .sidebar-top,
+      .sidebar-bottom,
+      .run-panel {
         width: 100%;
       }
 
-      .mobile-top-controls {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        order: -1;
-      }
-
-      .sidebar > .controls {
-        display: none;
-      }
-
-      .run-panel > .controls {
-        display: none;
-      }
-
-      .main-view {
+      .sidebar-top {
         order: 1;
       }
 
@@ -380,8 +391,12 @@
         order: 2;
       }
 
-      .sidebar {
+      .main-view {
         order: 3;
+      }
+
+      .sidebar-bottom {
+        order: 4;
       }
     }
 
